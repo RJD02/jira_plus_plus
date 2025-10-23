@@ -1,5 +1,6 @@
 import { GraphQLError } from "graphql";
 import {
+  Prisma,
   type Comment,
   type Issue,
   type JiraProject,
@@ -20,8 +21,71 @@ const ACTIVE_STATUS_KEYWORDS = ["progress", "doing", "active", "block", "review"
 const DONE_STATUS_VALUES = ["Done", "Closed", "Resolved", "Completed", "Cancelled"];
 const EMPTY_ISSUE_COUNTS: IssueCounts = { todo: 0, inProgress: 0, backlog: 0, done: 0, blocked: 0 };
 
-type IssueWithProjectSite = Issue & { project: JiraProject & { site: JiraSite | null } };
-type IssueWithBrowse = IssueWithProjectSite & { browseUrl: string | null };
+const ISSUE_SUMMARY_INCLUDE = Prisma.validator<Prisma.IssueInclude>()({
+  project: {
+    include: { site: true },
+  },
+  assignee: {
+    select: {
+      id: true,
+      displayName: true,
+      email: true,
+      avatarUrl: true,
+    },
+  },
+  reporter: {
+    select: {
+      id: true,
+      displayName: true,
+      email: true,
+      avatarUrl: true,
+    },
+  },
+  parent: {
+    select: {
+      id: true,
+      key: true,
+      summary: true,
+      status: true,
+      statusCategory: true,
+      priority: true,
+    },
+  },
+  linksOut: {
+    include: {
+      target: {
+        select: {
+          id: true,
+          key: true,
+          summary: true,
+          status: true,
+          statusCategory: true,
+          priority: true,
+        },
+      },
+    },
+  },
+  linksIn: {
+    include: {
+      source: {
+        select: {
+          id: true,
+          key: true,
+          summary: true,
+          status: true,
+          statusCategory: true,
+          priority: true,
+        },
+      },
+    },
+  },
+  insight: true,
+});
+
+type IssueWithDetails = Prisma.IssueGetPayload<{
+  include: typeof ISSUE_SUMMARY_INCLUDE;
+}>;
+type IssueWithBrowse = IssueWithDetails & { browseUrl: string | null };
 
 export type DailySummaryStatus = "ON_TRACK" | "DELAYED" | "BLOCKED";
 
@@ -148,7 +212,7 @@ function detectBlockerComments(comments: Comment[]): Comment[] {
   });
 }
 
-function buildBrowseUrl(issue: IssueWithProjectSite): string | null {
+function buildBrowseUrl(issue: IssueWithDetails): string | null {
   const baseUrl = issue.project.site?.baseUrl;
   if (!baseUrl) {
     return null;
@@ -592,11 +656,7 @@ async function generateSummaryForTarget({
           lt: windowEnd.toJSDate(),
         },
       },
-      include: {
-        project: {
-          include: { site: true },
-        },
-      },
+      include: ISSUE_SUMMARY_INCLUDE,
     }),
     prisma.issue.findMany({
       where: {
@@ -621,11 +681,7 @@ async function generateSummaryForTarget({
           },
         ],
       },
-      include: {
-        project: {
-          include: { site: true },
-        },
-      },
+      include: ISSUE_SUMMARY_INCLUDE,
       orderBy: { jiraUpdatedAt: "desc" },
       take: 30,
     }),
@@ -656,11 +712,7 @@ async function generateSummaryForTarget({
     where: {
       id: { in: Array.from(touchedIssueIds) },
     },
-    include: {
-      project: {
-        include: { site: true },
-      },
-    },
+    include: ISSUE_SUMMARY_INCLUDE,
   });
 
   const issues = issuesRaw.map<IssueWithBrowse>((issue) => ({

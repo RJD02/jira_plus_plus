@@ -27,7 +27,15 @@ const envSchema = z.object({
   JIRA_BASE_URL: z.string().min(1, "JIRA_BASE_URL is required"),
   JIRA_EMAIL: z.string().email(),
   JIRA_API_TOKEN: z.string().min(1, "JIRA_API_TOKEN is required"),
-  OPENAI_API_KEY: z.string().min(1, "OPENAI_API_KEY is required"),
+  OPENAI_API_KEY: z.string().optional(),
+  OPENAI_MODEL: z.string().default("gpt-4o-mini"),
+  LOCAL_LLM_URL: z.string().default("http://localhost:11434/api/generate"),
+  LOCAL_LLM_MODEL: z.string().default("mistral"),
+  INSIGHTS_LOCAL_TIMEOUT_MS: z.coerce.number().default(120000),
+  INSIGHTS_PROVIDER: z
+    .enum(["auto", "openai", "local"])
+    .default("local"),
+  INSIGHTS_CACHE_TTL_MINUTES: z.coerce.number().default(720),
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
   ENCRYPTION_SECRET: z.string().min(32, "ENCRYPTION_SECRET must be at least 32 characters"),
   ADMIN_EMAIL: z.string().email(),

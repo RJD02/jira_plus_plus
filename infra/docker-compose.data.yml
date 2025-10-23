@@ -19,3 +19,22 @@ services:
     container_name: jira_nats
     ports:
       - "4222:4222"
+
+  local-llm:
+    image: ollama/ollama:latest
+    container_name: jira_local_llm
+    command: ["serve"]
+    environment:
+      - OLLAMA_HOST=0.0.0.0
+    volumes:
+      - ollama_models:/root/.ollama
+    ports:
+      - "11434:11434"
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://localhost:11434/api/tags"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  ollama_models:

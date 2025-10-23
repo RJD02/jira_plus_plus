@@ -33,6 +33,12 @@ import {
 } from "./services/dailySummaryService.js";
 import { buildFocusBoard } from "./services/focusBoardService.js";
 import { buildManagerSummary, buildPortfolioManagerSummary } from "./services/managerSummaryService.js";
+import {
+  getIssueInsights,
+  mapInsightRecord,
+  type InsightProvider,
+  type IssueInsightDTO,
+} from "./services/insights/insightService.js";
 
 function requireUser(ctx: RequestContext) {
   if (!ctx.user) {
@@ -57,6 +63,22 @@ function requireAdmin(ctx: RequestContext) {
 
 const runAsTenant = <T>(ctx: RequestContext, fn: (tx: PrismaClient) => Promise<T>) =>
   ctx.withTenant(fn);
+
+function mapInsightToGraphQL(dto: IssueInsightDTO) {
+  return {
+    issueId: dto.issueId,
+    summary: dto.summary,
+    sentiment: dto.sentiment,
+    escalateScore: dto.escalateScore,
+    signals: dto.signals.map((signal) => ({
+      ...signal,
+      severity: signal.severity.toUpperCase(),
+    })),
+    computedAt: dto.computedAt,
+    expiresAt: dto.expiresAt ?? null,
+    providerMetadata: dto.providerMetadata ?? {},
+  };
+}
 
 export const resolvers = {
   DateTime: DateTimeResolver,
@@ -155,6 +177,41 @@ export const resolvers = {
           orderBy: { displayName: "asc" },
         }),
       );
+    },
+    issueInsights: async (
+      _parent: unknown,
+      args: { issueId: string; provider?: string; refresh?: boolean },
+      ctx: RequestContext,
+    ) => {
+      const auth = requireUser(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        const issue = await prisma.issue.findUnique({
+          where: { id: args.issueId },
+          select: { id: true, projectId: true },
+        });
+        if (!issue) {
+          throw new GraphQLError("Issue not found", { extensions: { code: "NOT_FOUND" } });
+        }
+        if (auth.role !== "ADMIN") {
+          const membership = await prisma.userProjectLink.count({
+            where: { projectId: issue.projectId, userId: auth.id },
+          });
+          if (!membership) {
+            throw new GraphQLError("You do not have access to this issue", {
+              extensions: { code: "FORBIDDEN" },
+            });
+          }
+        }
+        const provider = (args.provider ?? "auto").toLowerCase() as InsightProvider;
+        const insight = await getIssueInsights(
+          prisma,
+          ctx.tenantId,
+          issue.id,
+          provider,
+          Boolean(args.refresh),
+        );
+        return mapInsightToGraphQL(insight);
+      });
     },
     dailySummaries: async (
       _parent: unknown,
@@ -946,6 +1003,20 @@ export const resolvers = {
       );
     },
   },
+  IssueLink: {
+    source: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.source) return parent.source;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.issueLink.findUnique({ where: { id: parent.id } }).source(),
+      );
+    },
+    target: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.target) return parent.target;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.issueLink.findUnique({ where: { id: parent.id } }).target(),
+      );
+    },
+  },
   DailySummary: {
     user: (parent: any) => parent.user ?? null,
     trackedUser: async (parent: any, _args: unknown, ctx: RequestContext) => {
@@ -978,11 +1049,60 @@ export const resolvers = {
         prisma.jiraUser.findUnique({ where: { id: parent.assigneeId } }),
       );
     },
+    reporter: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.reporter) return parent.reporter;
+      if (!parent.reporterId) return null;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.jiraUser.findUnique({ where: { id: parent.reporterId } }),
+      );
+    },
+    parent: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.parent) return parent.parent;
+      if (!parent.parentIssueId) return null;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.issue.findUnique({ where: { id: parent.parentIssueId } }),
+      );
+    },
     project: (parent: any, _args: unknown, ctx: RequestContext) => {
       if (parent.project) return parent.project;
       return runAsTenant(ctx, (prisma) =>
         prisma.issue.findUnique({ where: { id: parent.id } }).project(),
       );
+    },
+    linksOut: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.linksOut) return parent.linksOut;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.issueLink.findMany({
+          where: { sourceIssueId: parent.id },
+          include: { target: true, source: true },
+        }),
+      );
+    },
+    linksIn: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.linksIn) return parent.linksIn;
+      return runAsTenant(ctx, (prisma) =>
+        prisma.issueLink.findMany({
+          where: { targetIssueId: parent.id },
+          include: { target: true, source: true },
+        }),
+      );
+    },
+    insight: async (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.insight) {
+        try {
+          return mapInsightToGraphQL(mapInsightRecord(parent.insight));
+        } catch {
+          // fall back to recomputation if stored record is malformed
+        }
+      }
+      try {
+        const insight = await runAsTenant(ctx, (prisma) =>
+          getIssueInsights(prisma, ctx.tenantId, parent.id, "auto" as InsightProvider, false),
+        );
+        return mapInsightToGraphQL(insight);
+      } catch {
+        return null;
+      }
     },
     comments: (parent: any, _args: unknown, ctx: RequestContext) => {
       if (parent.comments) return parent.comments;

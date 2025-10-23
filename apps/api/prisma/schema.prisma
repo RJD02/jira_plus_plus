@@ -43,6 +43,7 @@ model JiraUser {
   updatedAt      DateTime  @updatedAt
   comments       Comment[] @relation("CommentAuthor")
   issuesAssignee Issue[]   @relation("IssueAssignee")
+  reportedIssues Issue[]   @relation("IssueReporter")
   worklogs       Worklog[] @relation("WorklogAuthor")
 }
 
@@ -129,25 +130,52 @@ model Sprint {
 }
 
 model Issue {
-  id            String      @id @default(uuid())
-  jiraId        String      @unique
-  key           String
-  summary       String?
-  status        String
-  assigneeId    String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  jiraCreatedAt DateTime
-  jiraUpdatedAt DateTime
-  priority      String?
-  projectId     String
-  remoteData    Json?
-  sprintId      String?
-  comments      Comment[]
-  assignee      JiraUser?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
-  project       JiraProject @relation(fields: [projectId], references: [id])
-  sprint        Sprint?     @relation(fields: [sprintId], references: [id])
-  worklogs      Worklog[]
+  id               String      @id @default(uuid())
+  jiraId           String      @unique
+  key              String
+  summary          String?
+  status           String
+  assigneeId       String?
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  jiraCreatedAt    DateTime
+  jiraUpdatedAt    DateTime
+  priority         String?
+  projectId        String
+  remoteData       Json?
+  sprintId         String?
+  dueDate          DateTime?
+  assigneeChangedAt DateTime?
+  resolvedAt       DateTime?
+  startedAt        DateTime?
+  statusCategory   String?
+  browseUrl        String?
+  reporterId       String?
+  parentIssueId    String?
+  comments         Comment[]
+  assignee         JiraUser?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  reporter         JiraUser?   @relation("IssueReporter", fields: [reporterId], references: [id])
+  parent           Issue?      @relation("IssueParent", fields: [parentIssueId], references: [id])
+  children         Issue[]     @relation("IssueParent")
+  linksOut         IssueLink[] @relation("IssueLinkSource")
+  linksIn          IssueLink[] @relation("IssueLinkTarget")
+  project          JiraProject @relation(fields: [projectId], references: [id])
+  sprint           Sprint?     @relation(fields: [sprintId], references: [id])
+  worklogs         Worklog[]
+}
+
+
+model IssueLink {
+  id            String   @id @default(uuid())
+  sourceIssueId String
+  targetIssueId String
+  linkType      String
+  direction     String?
+  url           String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  source        Issue    @relation("IssueLinkSource", fields: [sourceIssueId], references: [id])
+  target        Issue    @relation("IssueLinkTarget", fields: [targetIssueId], references: [id])
 }
 
 model Comment {

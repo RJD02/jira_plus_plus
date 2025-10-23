@@ -1,9 +1,17 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import clsx from "clsx";
-import { gql, useMutation, useQuery } from "@apollo/client";
+import { gql, useLazyQuery, useMutation, useQuery } from "@apollo/client";
 import { AlertCircle, CheckCircle2 } from "lucide-react";
-import { AISummaryDrawer, InlineActionPayload, ScrumHeader, ScrumQuickGlance, TeamMetricsBar, UserSummaryCard } from "../components/scrum";
-import type { DailySummaryRecord } from "../types/scrum";
+import {
+  AISummaryDrawer,
+  InlineActionPayload,
+  IssueInsightsOverlay,
+  ScrumHeader,
+  ScrumQuickGlance,
+  TeamMetricsBar,
+  UserSummaryCard,
+} from "../components/scrum";
+import type { DailySummaryRecord, IssueInsight } from "../types/scrum";
 import { Modal } from "../components/ui/modal";
 import { Button } from "../components/ui/button";
 
@@ -46,27 +54,77 @@ const SUMMARY_FIELDS = gql`
       email
       role
     }
-    workItems {
-      status
-      items {
-        issue {
-          id
-          key
-          summary
+        workItems {
           status
-          priority
-          jiraUpdatedAt
-          browseUrl
-          project {
-            id
-            key
-            name
-          }
-        }
-        totalWorklogHours
-        recentWorklogs {
-          id
-          description
+          items {
+            issue {
+              id
+              key
+              summary
+              status
+              priority
+              statusCategory
+              dueDate
+              resolvedAt
+              startedAt
+              jiraUpdatedAt
+              browseUrl
+              assignee {
+                id
+                displayName
+                email
+                avatarUrl
+              }
+              reporter {
+                id
+                displayName
+                email
+                avatarUrl
+              }
+              parent {
+                id
+                key
+                summary
+                status
+              }
+              project {
+                id
+                key
+                name
+              }
+              linksOut {
+                id
+                linkType
+                direction
+                url
+                target {
+                  id
+                  key
+                  summary
+                  status
+                  statusCategory
+                  priority
+                }
+              }
+              linksIn {
+                id
+                linkType
+                direction
+                url
+                source {
+                  id
+                  key
+                  summary
+                  status
+                  statusCategory
+                  priority
+                }
+              }
+            }
+            totalWorklogHours
+            recentWorklogs {
+              id
+              description
           timeSpent
           jiraStartedAt
           author {
@@ -120,6 +178,34 @@ const REGENERATE_SUMMARY_MUTATION = gql`
   }
 `;
 
+const ISSUE_INSIGHTS_QUERY = gql`
+  query IssueInsights($issueId: ID!, $refresh: Boolean = false) {
+    issueInsights(issueId: $issueId, refresh: $refresh) {
+      summary {
+        text
+        provider
+        confidence
+      }
+      sentiment {
+        label
+        score
+        tones
+        provider
+      }
+      escalateScore
+      signals {
+        type
+        severity
+        detail
+        metadata
+      }
+      computedAt
+      expiresAt
+      providerMetadata
+    }
+  }
+`;
+
 interface ToastState {
   type: "success" | "error";
   message: string;
@@ -144,6 +230,13 @@ export function ScrumPage() {
   const [actionModal, setActionModal] = useState<InlineActionPayload | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(false);
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
+  const overlayEnabled = (import.meta.env.VITE_FEATURE_OVERLAY_ENABLED ?? "false") === "true";
+  const [overlayOpen, setOverlayOpen] = useState<boolean>(false);
+  const [overlayIssueId, setOverlayIssueId] = useState<string | null>(null);
+  const [insightsByIssueId, setInsightsByIssueId] = useState<Record<string, IssueInsight>>({});
+  const [loadingInsightId, setLoadingInsightId] = useState<string | null>(null);
+  const inflightInsights = useRef<Set<string>>(new Set());
+  const overlayIssueIdRef = useRef<string | null>(null);
 
   const {
     data: projectsData,
@@ -189,6 +282,52 @@ export function ScrumPage() {
     [summariesData?.dailySummaries],
   );
 
+  const [fetchIssueInsights, { loading: insightsLoading }] = useLazyQuery<
+    { issueInsights: IssueInsight }
+  >(ISSUE_INSIGHTS_QUERY, {
+    fetchPolicy: "network-only",
+    onError: (error) => {
+      setToast({ type: "error", message: friendlyError(error) });
+    },
+    onCompleted: (data) => {
+      if (!overlayIssueIdRef.current || !data?.issueInsights) {
+        return;
+      }
+      setInsightsByIssueId((current) => ({
+        ...current,
+        [overlayIssueIdRef.current as string]: data.issueInsights,
+      }));
+      setLoadingInsightId((current) =>
+        current === overlayIssueIdRef.current ? null : current,
+      );
+    },
+  });
+
+  const ensureInsight = useCallback(
+    async (issueId: string | null | undefined) => {
+      if (!issueId || inflightInsights.current.has(issueId) || insightsByIssueId[issueId]) {
+        return;
+      }
+      inflightInsights.current.add(issueId);
+      overlayIssueIdRef.current = issueId;
+      try {
+        setLoadingInsightId(issueId);
+        await fetchIssueInsights({ variables: { issueId } });
+      } finally {
+        inflightInsights.current.delete(issueId);
+        setLoadingInsightId((current) => (current === issueId ? null : current));
+      }
+    },
+    [fetchIssueInsights, insightsByIssueId],
+  );
+
+  useEffect(() => {
+    setInsightsByIssueId({});
+    inflightInsights.current.clear();
+    setLoadingInsightId(null);
+    overlayIssueIdRef.current = null;
+  }, [selectedDate, selectedProjectId]);
+
   useEffect(() => {
     if (!autoRefresh || !selectedProjectId) {
       return;
@@ -216,6 +355,16 @@ export function ScrumPage() {
     () => summaries.find((summary) => summary.id === selectedSummaryId) ?? null,
     [summaries, selectedSummaryId],
   );
+
+  useEffect(() => {
+    if (!overlayEnabled) {
+      return;
+    }
+    if (!selectedSummary) {
+      setOverlayOpen(false);
+      setOverlayIssueId(null);
+    }
+  }, [overlayEnabled, selectedSummary]);
 
   const teamMetrics = useMemo(() => {
     if (!summaries.length) {
@@ -349,6 +498,38 @@ export function ScrumPage() {
     setActionModal(payload);
   };
 
+  const openDetailView = (issueId?: string | null) => {
+    if (overlayEnabled) {
+      let resolvedIssueId = issueId ?? null;
+      if (!resolvedIssueId && selectedSummary) {
+        for (const group of selectedSummary.workItems) {
+          const candidate = group.items[0]?.issue.id;
+          if (candidate) {
+            resolvedIssueId = candidate;
+            break;
+          }
+        }
+      }
+      setOverlayIssueId(resolvedIssueId);
+      overlayIssueIdRef.current = resolvedIssueId;
+      setOverlayOpen(true);
+      setDrawerOpen(false);
+      void ensureInsight(resolvedIssueId);
+      return;
+    }
+    setDrawerOpen(true);
+  };
+
+  const closeDetailView = () => {
+    if (overlayEnabled) {
+      setOverlayOpen(false);
+      setOverlayIssueId(null);
+      overlayIssueIdRef.current = null;
+      return;
+    }
+    setDrawerOpen(false);
+  };
+
   const handleActionSubmit = (message: string) => {
     setToast({ type: "success", message });
     setActionModal(null);
@@ -356,7 +537,7 @@ export function ScrumPage() {
 
   const handleSelectSummary = (summaryId: string) => {
     setSelectedSummaryId(summaryId);
-    setDrawerOpen(true);
+    openDetailView();
   };
 
   return (
@@ -468,9 +649,18 @@ export function ScrumPage() {
                     expanded={false}
                     onToggle={() => {
                       setSelectedSummaryId(summary.id);
-                      setDrawerOpen(true);
+                      openDetailView();
                     }}
                     onAction={handleAction}
+                    insightsByIssueId={insightsByIssueId}
+                    onShowInsights={
+                      overlayEnabled
+                        ? (issueId) => {
+                            setSelectedSummaryId(summary.id);
+                            openDetailView(issueId);
+                          }
+                        : undefined
+                    }
                   />
                 ))}
                 {!summariesLoading && selectedProjectId && !summaries.length ? (
@@ -485,8 +675,16 @@ export function ScrumPage() {
                   <UserSummaryCard
                     summary={selectedSummary}
                     expanded
-                    onToggle={() => setDrawerOpen(true)}
+                    onToggle={() => openDetailView()}
                     onAction={handleAction}
+                    insightsByIssueId={insightsByIssueId}
+                    onShowInsights={
+                      overlayEnabled
+                        ? (issueId) => {
+                            openDetailView(issueId);
+                          }
+                        : undefined
+                    }
                   />
                 ) : (
                   <div className="rounded-3xl border border-dashed border-slate-200 bg-white p-8 text-center text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
@@ -504,13 +702,29 @@ export function ScrumPage() {
           onSubmit={handleActionSubmit}
         />
       </section>
-      <AISummaryDrawer
-        open={drawerOpen && Boolean(selectedSummary)}
-        summary={selectedSummary}
-        regenerating={regenerating}
-        onRegenerate={handleRegenerate}
-        onClose={() => setDrawerOpen(false)}
-      />
+      {overlayEnabled ? (
+        <IssueInsightsOverlay
+          open={overlayOpen && Boolean(selectedSummary)}
+          summary={selectedSummary}
+          initialIssueId={overlayIssueId}
+          insights={insightsByIssueId}
+          loadingIssueId={loadingInsightId}
+          insightsLoading={insightsLoading}
+          onRequestInsight={(issueId) => {
+            overlayIssueIdRef.current = issueId;
+            void ensureInsight(issueId);
+          }}
+          onClose={closeDetailView}
+        />
+      ) : (
+        <AISummaryDrawer
+          open={drawerOpen && Boolean(selectedSummary)}
+          summary={selectedSummary}
+          regenerating={regenerating}
+          onRegenerate={handleRegenerate}
+          onClose={closeDetailView}
+        />
+      )}
     </div>
   );
 }

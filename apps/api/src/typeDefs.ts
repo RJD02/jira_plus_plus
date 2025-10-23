@@ -24,6 +24,49 @@ export const typeDefs = gql`
     FAILED
   }
 
+  enum InsightsProvider {
+    AUTO
+    OPENAI
+    LOCAL
+  }
+
+  enum InsightSeverity {
+    LOW
+    MEDIUM
+    HIGH
+  }
+
+  type InsightSummary {
+    text: String!
+    provider: String!
+    confidence: Float
+  }
+
+  type InsightSentiment {
+    label: String!
+    score: Float!
+    tones: [String!]!
+    provider: String!
+  }
+
+  type InsightSignal {
+    type: String!
+    severity: InsightSeverity!
+    detail: String!
+    metadata: JSON
+  }
+
+  type IssueInsight {
+    issueId: ID!
+    summary: InsightSummary!
+    sentiment: InsightSentiment!
+    escalateScore: Float!
+    signals: [InsightSignal!]!
+    computedAt: DateTime!
+    expiresAt: DateTime
+    providerMetadata: JSON
+  }
+
   type HealthCheck {
     status: String!
     timestamp: String!
@@ -122,14 +165,32 @@ export const typeDefs = gql`
     status: String!
     browseUrl: String
     priority: String
+    dueDate: DateTime
+    resolvedAt: DateTime
+    startedAt: DateTime
+    statusCategory: String
     assignee: JiraUser
+    reporter: JiraUser
+    parent: Issue
     project: JiraProject!
     sprint: Sprint
+    linksOut: [IssueLink!]!
+    linksIn: [IssueLink!]!
+    insight: IssueInsight
     jiraCreatedAt: DateTime!
     jiraUpdatedAt: DateTime!
     remoteData: JSON
     comments: [Comment!]!
     worklogs: [Worklog!]!
+  }
+
+  type IssueLink {
+    id: ID!
+    linkType: String!
+    direction: String
+    url: String
+    source: Issue
+    target: Issue
   }
 
   type Comment {
@@ -385,6 +446,7 @@ export const typeDefs = gql`
     syncLogs(projectId: ID!, limit: Int = 50): [SyncLog!]!
     projectSprints(projectId: ID!): [Sprint!]!
     managerSummary(projectId: ID, sprintId: ID): ManagerSummary!
+    issueInsights(issueId: ID!, provider: InsightsProvider = AUTO, refresh: Boolean = false): IssueInsight!
   }
 
   type JiraProjectOption {

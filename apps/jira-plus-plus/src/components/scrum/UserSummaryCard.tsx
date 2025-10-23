@@ -8,9 +8,10 @@ import {
   Shuffle,
   Clock3,
   CheckCircle2,
+  Sparkles,
 } from "lucide-react";
 import { Button } from "../ui/button";
-import type { DailySummaryRecord, DailySummaryWorkItem } from "../../types/scrum";
+import type { DailySummaryRecord, DailySummaryWorkItem, IssueInsight } from "../../types/scrum";
 
 export type InlineActionType = "comment" | "reassign" | "status";
 
@@ -25,6 +26,8 @@ interface UserSummaryCardProps {
   expanded: boolean;
   onToggle: () => void;
   onAction: (payload: InlineActionPayload) => void;
+  onShowInsights?: (issueId: string) => void;
+  insightsByIssueId?: Record<string, IssueInsight | null | undefined>;
 }
 
 const STATUS_UI = {
@@ -54,7 +57,14 @@ const ACTION_META: Record<InlineActionType, { label: string; icon: ComponentType
   status: { label: "Change status", icon: Shuffle },
 };
 
-export function UserSummaryCard({ summary, expanded, onToggle, onAction }: UserSummaryCardProps) {
+export function UserSummaryCard({
+  summary,
+  expanded,
+  onToggle,
+  onAction,
+  onShowInsights,
+  insightsByIssueId,
+}: UserSummaryCardProps) {
   const ui = STATUS_UI[summary.status];
   const StatusIcon = ui.icon;
   const [expandedIssueIds, setExpandedIssueIds] = useState<Set<string>>(new Set());
@@ -177,13 +187,16 @@ export function UserSummaryCard({ summary, expanded, onToggle, onAction }: UserS
                   {group.items.map((item) => {
                     const isIssueOpen = expandedIssueIds.has(item.issue.id);
                     const priorityLabel = item.issue.priority?.trim();
+                    const hasInsights = Boolean(
+                      insightsByIssueId?.[item.issue.id] ?? item.issue.insight,
+                    );
                     return (
                       <article
                         key={item.issue.id}
                         className="rounded-2xl border border-slate-200 bg-white/80 p-5 shadow-sm transition hover:border-slate-300 dark:border-slate-800 dark:bg-slate-900/40"
                       >
                         <div className="flex flex-col gap-4">
-                          <div className="flex items-start gap-3">
+                             <div className="flex items-start gap-3">
                             <button
                               type="button"
                               onClick={() => toggleIssue(item.issue.id)}
@@ -230,7 +243,21 @@ export function UserSummaryCard({ summary, expanded, onToggle, onAction }: UserS
                               </div>
                             </div>
                           </div>
-                          <div className="flex flex-wrap gap-2">
+                              <div className="flex flex-wrap gap-2">
+                            {onShowInsights ? (
+                              <Button
+                                type="button"
+                                size="sm"
+                                variant={hasInsights ? "secondary" : "outline"}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  onShowInsights(item.issue.id);
+                                }}
+                              >
+                                <Sparkles className="mr-2 h-4 w-4" />
+                                Insights
+                              </Button>
+                            ) : null}
                             {(['comment', 'reassign', 'status'] as InlineActionType[]).map((action) => {
                               const meta = ACTION_META[action];
                               const Icon = meta.icon;

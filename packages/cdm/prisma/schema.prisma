@@ -34,6 +34,8 @@ model Tenant {
   syncLogs            SyncLog[]
   tickets             Ticket[]
   artifacts           Artifact[]
+  issueLinks          IssueLink[]
+  issueInsights       IssueInsight[]
 }
 
 model User {
@@ -82,6 +84,7 @@ model JiraUser {
   comments       Comment[] @relation("CommentAuthor")
   issuesAssignee Issue[]   @relation("IssueAssignee")
   worklogs       Worklog[] @relation("WorklogAuthor")
+  reportedIssues Issue[]   @relation("IssueReporter")
   tenant         Tenant    @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, accountId])
@@ -205,16 +208,71 @@ model Issue {
   projectId     String
   remoteData    Json?
   sprintId      String?
+  dueDate       DateTime?
+  assigneeChangedAt DateTime?
+  resolvedAt    DateTime?
+  startedAt     DateTime?
+  statusCategory String?
+  browseUrl     String?
+  reporterId    String?
+  parentIssueId String?
   comments      Comment[]
   assignee      JiraUser?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  reporter      JiraUser?   @relation("IssueReporter", fields: [reporterId], references: [id])
+  parent        Issue?      @relation("IssueParent", fields: [parentIssueId], references: [id])
+  children      Issue[]     @relation("IssueParent")
+  linksOut      IssueLink[] @relation("IssueLinkSource")
+  linksIn       IssueLink[] @relation("IssueLinkTarget")
   project       JiraProject @relation(fields: [projectId], references: [id])
   sprint        Sprint?     @relation(fields: [sprintId], references: [id])
   worklogs      Worklog[]
+  insight       IssueInsight?
   tenant        Tenant      @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, jiraId])
   @@unique([tenantId, key])
   @@index([tenantId, projectId])
+  @@index([tenantId, reporterId])
+  @@index([tenantId, parentIssueId])
+  @@index([tenantId, dueDate])
+}
+
+
+model IssueLink {
+  id            String   @id @default(uuid())
+  tenantId      String   @default("dev")
+  sourceIssueId String
+  targetIssueId String
+  linkType      String
+  direction     String?
+  url           String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  source        Issue    @relation("IssueLinkSource", fields: [sourceIssueId], references: [id])
+  target        Issue    @relation("IssueLinkTarget", fields: [targetIssueId], references: [id])
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, sourceIssueId])
+  @@index([tenantId, targetIssueId])
+}
+
+model IssueInsight {
+  id              String   @id @default(uuid())
+  tenantId        String   @default("dev")
+  issueId         String   @unique
+  summary         Json?
+  sentiments      Json?
+  escalationScore Float?
+  signals         Json?
+  providerMetadata Json?
+  lastIssueHash   String
+  metadata        Json?
+  computedAt      DateTime @default(now())
+  expiresAt       DateTime?
+  issue           Issue    @relation(fields: [issueId], references: [id])
+  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, computedAt])
 }
 
 model Comment {

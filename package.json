@@ -23,7 +23,7 @@
     "hooks": "bash scripts/setup-hooks.sh",
     "e2e:run": "cypress run --config-file cypress.config.ts",
     "e2e:open": "cypress open --config-file cypress.config.ts",
-    "db:up": "dotenv -e .env -- docker compose -f infra/docker-compose.yml -f infra/docker-compose.data.yml up -d --remove-orphans postgres minio nats",
+    "db:up": "dotenv -e .env -- docker compose -f infra/docker-compose.yml -f infra/docker-compose.data.yml up -d --remove-orphans postgres minio nats local-llm",
     "db:down": "dotenv -e .env -- docker compose -f infra/docker-compose.yml -f infra/docker-compose.data.yml down --remove-orphans",
     "stack:up": "dotenv -e .env -- docker compose -f infra/docker-compose.yml up -d",
     "stack:down": "dotenv -e .env -- docker compose -f infra/docker-compose.yml down",

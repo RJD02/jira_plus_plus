@@ -11,8 +11,12 @@ import {
 import type { SyncCursor } from "../workflows/syncProjectWorkflow.js";
 import { getEnv } from "../../env.js";
 import { recordSyncFailure, recordSyncSuccess } from "../../services/telemetry/syncTelemetryService.js";
+import { ensureIssueInsights, type InsightProvider } from "../../services/insights/insightService.js";
 
 const ENTITY_KEYS = ["issue", "comment", "worklog"] as const;
+
+const PROGRESS_STATUS_KEYWORDS = ["in progress", "in-review", "doing", "active"];
+const RESOLVED_STATUS_KEYWORDS = ["done", "resolved", "closed", "completed", "closed (done)"];
 
 interface PrepareProjectSyncArgs {
   projectId: string;
@@ -445,6 +449,45 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
   const tenantId = getEnv().TENANT_ID;
   const fields = detail.fields ?? {};
   const assigneeId = await upsertJiraUser(fields.assignee, tenantId, detail.id);
+  const reporterId = fields.reporter ? await upsertJiraUser(fields.reporter, tenantId, `${detail.id}-reporter`) : null;
+
+  let assigneeChangedAt: Date | null = null;
+  let startedAt: Date | null = null;
+  let resolvedAt: Date | null = fields.resolutiondate ? new Date(fields.resolutiondate) : null;
+
+  for (const entry of detail.changelog?.histories ?? []) {
+    if (!entry || !entry.created) continue;
+    const createdAt = new Date(entry.created);
+    const items = Array.isArray(entry.items) ? entry.items : [];
+
+    if (!assigneeChangedAt && items.some((item: any) => item?.field === "assignee")) {
+      assigneeChangedAt = createdAt;
+    }
+
+    if (!startedAt && items.some((item: any) => typeof item?.toString === "string" && PROGRESS_STATUS_KEYWORDS.some((keyword) => item.toString.toLowerCase().includes(keyword)))) {
+      startedAt = createdAt;
+    }
+
+    if (!resolvedAt && items.some((item: any) => typeof item?.toString === "string" && RESOLVED_STATUS_KEYWORDS.some((keyword) => item.toString.toLowerCase().includes(keyword)))) {
+      resolvedAt = createdAt;
+    }
+  }
+
+  const statusCategory = fields.status?.statusCategory?.name ?? null;
+  const dueDate = fields.duedate ? new Date(fields.duedate) : null;
+
+  let browseUrl: string | null = null;
+  if (detail.self) {
+    try {
+      const url = new URL(detail.self);
+      url.pathname = `/browse/${detail.key}`;
+      url.search = "";
+      url.hash = "";
+      browseUrl = url.toString();
+    } catch {
+      browseUrl = null;
+    }
+  }
 
   let sprintId: string | null = null;
   const sprintField = fields.sprint ?? (fields.closedSprints?.[0] ?? null);
@@ -469,6 +512,8 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
     sprintId = sprint.id;
   }
 
+  const parentIssueId = fields.parent?.id ? await ensureIssueStub(fields.parent, tenantId, projectId) : null;
+
   const issueRecord = await prisma.issue.upsert({
     where: {
       tenantId_jiraId: {
@@ -485,7 +530,15 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
       status: fields.status?.name ?? "Unknown",
       priority: fields.priority?.name ?? null,
       assigneeId,
+      reporterId,
       sprintId,
+      parentIssueId,
+      dueDate,
+      assigneeChangedAt,
+      resolvedAt,
+      startedAt,
+      statusCategory,
+      browseUrl,
       jiraCreatedAt: fields.created ? new Date(fields.created) : new Date(),
       jiraUpdatedAt: fields.updated ? new Date(fields.updated) : new Date(),
       remoteData: detail,
@@ -496,11 +549,54 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
       status: fields.status?.name ?? "Unknown",
       priority: fields.priority?.name ?? null,
       assigneeId,
+      reporterId,
       sprintId,
+      parentIssueId,
+      dueDate,
+      assigneeChangedAt,
+      resolvedAt,
+      startedAt,
+      statusCategory,
+      browseUrl,
       jiraUpdatedAt: fields.updated ? new Date(fields.updated) : new Date(),
       remoteData: detail,
     },
   });
+
+  await prisma.issueLink.deleteMany({
+    where: {
+      tenantId,
+      OR: [
+        { sourceIssueId: issueRecord.id },
+        { targetIssueId: issueRecord.id },
+      ],
+    },
+  });
+
+  const issueLinks: any[] = fields.issuelinks ?? [];
+  for (const link of issueLinks) {
+    if (!link?.outwardIssue?.id) {
+      continue;
+    }
+
+    const targetId = await ensureIssueStub(link.outwardIssue, tenantId, projectId);
+    if (!targetId) {
+      continue;
+    }
+
+    const linkUrl = buildBrowseUrl(link.outwardIssue.self, link.outwardIssue.key ?? link.outwardIssue.id ?? detail.key);
+
+    await prisma.issueLink.create({
+      data: {
+        tenantId,
+        sourceIssueId: issueRecord.id,
+        targetIssueId: targetId,
+        linkType: link.type?.name ?? "UNKNOWN",
+        direction: link.type?.outward ?? "outward",
+        url: linkUrl,
+      },
+    });
+  }
 
   const comments = detail.fields?.comment?.comments ?? [];
   for (const comment of comments) {
@@ -561,6 +657,8 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
       },
     });
   }
+  const provider = (getEnv().INSIGHTS_PROVIDER ?? 'auto') as InsightProvider;
+  await ensureIssueInsights(prisma, tenantId, issueRecord.id, provider);
 }
 
 async function upsertJiraUser(user: any, tenantId: string, fallbackKey?: string): Promise<string> {
@@ -591,4 +689,94 @@ async function upsertJiraUser(user: any, tenantId: string, fallbackKey?: string)
   });
 
   return record.id;
+}
+
+
+async function ensureIssueStub(reference: any, tenantId: string, fallbackProjectId: string): Promise<string | null> {
+  if (!reference?.id) {
+    return null;
+  }
+
+  const jiraId: string = reference.id;
+  const key: string = reference.key ?? reference.keyString ?? reference.id;
+
+  const existing = await prisma.issue.findUnique({
+    where: {
+      tenantId_jiraId: {
+        tenantId,
+        jiraId,
+      },
+    },
+  });
+  if (existing) {
+    return existing.id;
+  }
+
+  let projectId = fallbackProjectId;
+  const projectKey: string | undefined = reference.fields?.project?.key ?? reference.fields?.projectKey;
+  if (projectKey) {
+    const projectRecord = await prisma.jiraProject.findFirst({
+      where: { tenantId, key: projectKey },
+    });
+    if (projectRecord) {
+      projectId = projectRecord.id;
+    }
+  }
+
+  const summary = reference.fields?.summary ?? key;
+  const status = reference.fields?.status?.name ?? "Unknown";
+  const priority = reference.fields?.priority?.name ?? null;
+  const jiraCreatedAt = reference.fields?.created ? new Date(reference.fields.created) : new Date();
+  const jiraUpdatedAt = reference.fields?.updated ? new Date(reference.fields.updated) : new Date();
+  const stubAssigneeId = reference.fields?.assignee
+    ? await upsertJiraUser(reference.fields.assignee, tenantId, `${reference.id}-assignee`)
+    : null;
+
+  const stub = await prisma.issue.upsert({
+    where: {
+      tenantId_jiraId: {
+        tenantId,
+        jiraId,
+      },
+    },
+    create: {
+      tenantId,
+      jiraId,
+      key,
+      projectId,
+      summary,
+      status,
+      priority,
+      assigneeId: stubAssigneeId,
+      jiraCreatedAt,
+      jiraUpdatedAt,
+      remoteData: reference,
+    },
+    update: {
+      key,
+      summary,
+      status,
+      priority,
+      assigneeId: stubAssigneeId ?? undefined,
+      jiraUpdatedAt,
+      remoteData: reference,
+    },
+  });
+
+  return stub.id;
+}
+
+function buildBrowseUrl(self: string | undefined, key: string | undefined | null): string | null {
+  if (!self || !key) {
+    return null;
+  }
+  try {
+    const url = new URL(self);
+    url.pathname = `/browse/${key}`;
+    url.search = "";
+    url.hash = "";
+    return url.toString();
+  } catch {
+    return null;
+  }
 }
