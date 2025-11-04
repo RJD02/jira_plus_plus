@@ -1,16 +1,36 @@
 import clsx from "clsx";
-import type { DailySummaryRecord } from "../../types/scrum";
+import type {
+  DailySummaryRecord,
+  TaskSummarySnapshotRecord,
+  UserSummarySnapshotRecord,
+} from "../../types/scrum";
 import { AISummaryPanel } from "./AISummaryPanel";
 
 interface AISummaryDrawerProps {
   open: boolean;
   summary: DailySummaryRecord | null;
+  userSnapshot: UserSummarySnapshotRecord | null;
+  taskSummaries: TaskSummarySnapshotRecord[];
   regenerating: boolean;
   onRegenerate: () => void;
+  onRefreshNarrative?: () => void;
+  narrativeRefreshing?: boolean;
+  onOpenIssue: (issueId: string) => void;
   onClose: () => void;
 }
 
-export function AISummaryDrawer({ open, summary, regenerating, onRegenerate, onClose }: AISummaryDrawerProps) {
+export function AISummaryDrawer({
+  open,
+  summary,
+  userSnapshot,
+  taskSummaries,
+  regenerating,
+  onRegenerate,
+  onRefreshNarrative,
+  narrativeRefreshing,
+  onOpenIssue,
+  onClose,
+}: AISummaryDrawerProps) {
   return (
     <div
       className={clsx(
@@ -46,7 +66,16 @@ export function AISummaryDrawer({ open, summary, regenerating, onRegenerate, onC
             </button>
           </div>
           <div className="flex-1 overflow-y-auto p-4">
-            <AISummaryPanel summary={summary} regenerating={regenerating} onRegenerate={onRegenerate} />
+            <AISummaryPanel
+              summary={summary}
+              userSnapshot={userSnapshot}
+              taskSummaries={taskSummaries}
+              regenerating={regenerating}
+              onRegenerate={onRegenerate}
+              onRefreshNarrative={onRefreshNarrative}
+              narrativeRefreshing={narrativeRefreshing}
+              onOpenIssue={onOpenIssue}
+            />
           </div>
         </div>
       </div>

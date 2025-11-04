@@ -56,6 +56,43 @@ export const typeDefs = gql`
     metadata: JSON
   }
 
+  type InsightDelta {
+    newCommentCount: Int!
+    latestCommentAuthors: [String!]!
+    newWorklogHours: Float!
+  }
+
+  type InsightStageBucket {
+    key: String!
+    label: String!
+    total: Int!
+    inProgress: Int!
+    done: Int!
+    todo: Int!
+  }
+
+  type InsightStageProgress {
+    current: String!
+    breakdown: [InsightStageBucket!]!
+  }
+
+  type IssueInsightHistoryEntry {
+    id: ID!
+    issueId: ID!
+    provider: String!
+    summary: InsightSummary!
+    sentiment: InsightSentiment!
+    escalateScore: Float!
+    signals: [InsightSignal!]!
+    computedAt: DateTime!
+    expiresAt: DateTime
+    providerMetadata: JSON
+    stage: InsightStageProgress
+    delta: InsightDelta
+    requirement: String
+    waitingOn: [String!]!
+  }
+
   type IssueInsight {
     issueId: ID!
     summary: InsightSummary!
@@ -65,6 +102,12 @@ export const typeDefs = gql`
     computedAt: DateTime!
     expiresAt: DateTime
     providerMetadata: JSON
+    provider: String!
+    stage: InsightStageProgress
+    delta: InsightDelta
+    requirement: String
+    waitingOn: [String!]!
+    history(limit: Int = 5): [IssueInsightHistoryEntry!]!
   }
 
   type HealthCheck {
@@ -112,6 +155,7 @@ export const typeDefs = gql`
     trackedUsers: [ProjectTrackedUser!]!
     syncJob: SyncJob
     syncStates: [SyncState!]!
+    summarySchedule: ProjectSummarySchedule
     createdAt: DateTime!
     updatedAt: DateTime!
   }
@@ -135,6 +179,19 @@ export const typeDefs = gql`
     status: SyncJobStatus!
     lastRunAt: DateTime
     nextRunAt: DateTime
+    createdAt: DateTime!
+    updatedAt: DateTime!
+  }
+
+  type ProjectSummarySchedule {
+    id: ID!
+    frequencyMinutes: Int!
+    enabled: Boolean!
+    nextRunAt: DateTime
+    lastRunAt: DateTime
+    lockedUntil: DateTime
+    lastError: String
+    lastErrorAt: DateTime
     createdAt: DateTime!
     updatedAt: DateTime!
   }
@@ -217,6 +274,7 @@ export const typeDefs = gql`
     ON_TRACK
     DELAYED
     BLOCKED
+    OFFLINE
   }
 
   type IssueStatusCounts {
@@ -253,9 +311,280 @@ export const typeDefs = gql`
     createdAt: DateTime!
     updatedAt: DateTime!
     status: DailySummaryStatus!
+    isUnavailable: Boolean!
     worklogHours: Float!
     issueCounts: IssueStatusCounts!
     workItems: [DailySummaryWorkItemGroup!]!
+  }
+
+  enum TaskSummaryStatus {
+    BLOCKED
+    IN_PROGRESS
+    IN_REVIEW
+    DONE
+    STALLED
+  }
+
+  type TaskTimelineEvent {
+    at: DateTime!
+    label: String!
+    actorId: ID
+  }
+
+  type TaskParticipant {
+    userId: ID
+    displayName: String!
+    contributionMinutes: Int!
+    commentCount: Int!
+    waitingOn: Boolean
+  }
+
+  enum TaskLinkedResourceType {
+    issue
+    pr
+    doc
+    other
+  }
+
+  type TaskLinkedResource {
+    label: String!
+    url: String!
+    type: TaskLinkedResourceType!
+  }
+
+  type SentimentSnapshot {
+    label: String!
+    score: Float!
+    provider: String!
+  }
+
+  type TaskSummaryPayload {
+    issueId: ID!
+    issueKey: String!
+    issueSummary: String!
+    headline: String!
+    status: TaskSummaryStatus!
+    activityBullets: [String!]!
+    nextStep: String
+    riskFlags: [String!]!
+    totalWorklogMinutes: Int!
+    commentCount: Int!
+    lastActivityAt: DateTime
+    timeline: [TaskTimelineEvent!]!
+    participants: [TaskParticipant!]!
+    sentiment: SentimentSnapshot
+    linkedResources: [TaskLinkedResource!]!
+  }
+
+  type TaskSummarySnapshot {
+    id: ID!
+    projectId: ID!
+    issueId: ID!
+    userId: ID
+    summaryDate: Date!
+    runId: String!
+    createdAt: DateTime!
+    payload: TaskSummaryPayload!
+  }
+
+  type UserSummaryMetrics {
+    worklogMinutes: Int!
+    tasksTouched: Int!
+    doneCount: Int!
+    blockerCount: Int!
+  }
+
+  type UserSummaryIdentity {
+    userId: ID
+    trackedUserId: ID
+    displayName: String!
+    jiraAccountId: String
+  }
+
+  type UserSummaryPayload {
+    identity: UserSummaryIdentity!
+    headline: String!
+    accomplishments: [UserSummaryHighlight!]!
+    inFlight: [UserSummaryInFlight!]!
+    blockers: [UserSummaryBlocker!]!
+    focusNext: String
+    activityMetrics: UserSummaryMetrics!
+    riskFlags: [String!]!
+    collaborationNotes: [CollaborationNote!]
+    pendingDecisions: PendingDecisionSet
+    mood: MoodSnapshot
+  }
+
+  type CollaborationNote {
+    partnerUserId: ID
+    partnerDisplayName: String
+    issueId: ID
+    issueKey: String
+    note: String!
+  }
+
+  type PendingDecision {
+    issueId: ID!
+    issueKey: String!
+    description: String!
+  }
+
+  type PendingDecisionSet {
+    ownedByUser: [PendingDecision!]!
+    waitingOnOthers: [PendingDecision!]!
+  }
+
+  type MoodSnapshot {
+    label: String!
+    score: Float!
+    rationale: String
+  }
+
+  type UserSummaryHighlight {
+    issueId: ID!
+    issueKey: String!
+    text: String!
+  }
+
+  type UserSummaryInFlight {
+    issueId: ID!
+    issueKey: String!
+    status: TaskSummaryStatus!
+    note: String!
+  }
+
+  type UserSummaryBlocker {
+    issueId: ID!
+    issueKey: String!
+    description: String!
+    severity: String!
+  }
+
+  type UserSummarySnapshot {
+    id: ID!
+    projectId: ID!
+    userId: ID
+    summaryDate: Date!
+    runId: String!
+    taskSummaryIds: [ID!]!
+    createdAt: DateTime!
+    payload: UserSummaryPayload!
+    narrative: String
+    narrativeHash: String
+    narrativeGeneratedAt: DateTime
+    richNarratives: JSON
+    needsNarrativeRefresh: Boolean!
+    narrativeRefreshRequestedAt: DateTime
+    narrativeRefreshLockedUntil: DateTime
+    narrativeRefreshAttempts: Int!
+    lastNarrativeError: String
+  }
+
+  type ProjectSummaryPayload {
+    executiveBrief: String!
+    topHighlights: [ProjectSummaryHighlight!]!
+    criticalBlockers: [ProjectSummaryBlocker!]!
+    atRiskWork: [ProjectRiskTally!]!
+    teamHealthSnapshot: ProjectTeamHealth!
+    unassignedWatchlist: [ProjectWatchIssue!]!
+    callsToAction: [ProjectCallToAction!]!
+    atRiskDetails: [ProjectAtRiskDetail!]!
+    workspaceContext: String
+  }
+
+  type ProjectCallToAction {
+    text: String!
+    severity: ProjectCallToActionSeverity!
+  }
+
+  enum ProjectCallToActionSeverity {
+    info
+    warning
+    critical
+  }
+
+  type ProjectAtRiskDetail {
+    issueId: ID!
+    issueKey: String!
+    reason: String!
+    severity: ProjectCallToActionSeverity!
+  }
+
+  type ProjectSummaryHighlight {
+    issueId: ID!
+    issueKey: String!
+    userId: ID
+    text: String!
+  }
+
+  type ProjectSummaryBlocker {
+    issueId: ID!
+    issueKey: String!
+    userId: ID
+    description: String!
+    severity: String!
+  }
+
+  type ProjectRiskTally {
+    flag: String!
+    count: Int!
+  }
+
+  type ProjectTeamHealth {
+    activeUsers: Int!
+    trackedUsers: Int!
+    idleUsers: Int!
+    offlineUsers: Int!
+    totalWorklogMinutes: Int!
+    doneCount: Int!
+    blockerCount: Int!
+    idleRate: Float!
+    blockerRate: Float!
+  }
+
+  type ProjectWatchIssue {
+    issueId: ID!
+    issueKey: String!
+    issueSummary: String!
+  }
+
+  type UserAvailability {
+    id: ID!
+    projectId: ID
+    jiraAccountId: String!
+    startDate: DateTime!
+    endDate: DateTime!
+    type: String!
+    source: String!
+    reason: String
+    createdAt: DateTime!
+    updatedAt: DateTime!
+    project: JiraProject
+  }
+
+  type ProjectSummarySnapshot {
+    id: ID!
+    projectId: ID!
+    summaryDate: Date!
+    runId: String!
+    userSummaryIds: [ID!]!
+    createdAt: DateTime!
+    payload: ProjectSummaryPayload!
+    narrative: String
+    narrativeHash: String
+    narrativeGeneratedAt: DateTime
+    richNarratives: JSON
+    needsNarrativeRefresh: Boolean!
+    narrativeRefreshRequestedAt: DateTime
+    narrativeRefreshLockedUntil: DateTime
+    narrativeRefreshAttempts: Int!
+    lastNarrativeError: String
+  }
+
+  type ProjectDailySummary {
+    projectSummary: ProjectSummarySnapshot!
+    userSummaries: [UserSummarySnapshot!]!
+    taskSummaries: [TaskSummarySnapshot!]!
   }
 
   type FocusDateRange {
@@ -288,6 +617,16 @@ export const typeDefs = gql`
     author: JiraUser
     body: String
     hours: Float
+  }
+
+  enum NarrativeScope {
+    PROJECT
+    USER
+  }
+
+  type NarrativeRefreshResult {
+    queuedProject: Int!
+    queuedUser: Int!
   }
 
   type FocusIssueEventGroup {
@@ -411,6 +750,25 @@ export const typeDefs = gql`
     jiraAccountId: String!
   }
 
+  input UpdateProjectSummaryScheduleInput {
+    enabled: Boolean
+    frequencyMinutes: Int
+  }
+
+  input DateRangeInput {
+    start: Date!
+    end: Date!
+  }
+
+  input CreateUserAvailabilityInput {
+    projectId: ID
+    jiraAccountId: String!
+    startDate: DateTime!
+    endDate: DateTime!
+    type: String
+    reason: String
+  }
+
   input ProjectTrackedUserInput {
     jiraAccountId: String!
     displayName: String!
@@ -440,6 +798,8 @@ export const typeDefs = gql`
     jiraProjectUserOptions(siteId: ID!, projectKey: String!, forceRefresh: Boolean = false): [JiraUserOption!]!
     projectTrackedUsers(projectId: ID!): [ProjectTrackedUser!]!
     dailySummaries(date: Date!, projectId: ID!): [DailySummary!]!
+    projectDailySummaries(projectId: ID!, range: DateRangeInput!, includeTasks: Boolean = false): [ProjectDailySummary!]!
+    latestProjectSummary(projectId: ID!): ProjectDailySummary
     scrumProjects: [JiraProject!]!
     focusBoard(projectIds: [ID!], start: Date, end: Date): FocusBoard!
     syncStates(projectId: ID!): [SyncState!]!
@@ -447,6 +807,7 @@ export const typeDefs = gql`
     projectSprints(projectId: ID!): [Sprint!]!
     managerSummary(projectId: ID, sprintId: ID): ManagerSummary!
     issueInsights(issueId: ID!, provider: InsightsProvider = AUTO, refresh: Boolean = false): IssueInsight!
+    userAvailability(accountId: String, from: Date, to: Date): [UserAvailability!]!
   }
 
   type JiraProjectOption {
@@ -498,9 +859,30 @@ export const typeDefs = gql`
     pauseProjectSync(projectId: ID!): Boolean!
     resumeProjectSync(projectId: ID!): Boolean!
     rescheduleProjectSync(projectId: ID!, cron: String!): Boolean!
-    triggerProjectSync(projectId: ID!, full: Boolean = false, accountIds: [String!]): Boolean!
+    triggerProjectSync(projectId: ID!, full: Boolean = false, accountIds: [String!], days: Int): Boolean!
+    createUserAvailability(input: CreateUserAvailabilityInput!): UserAvailability!
+    deleteUserAvailability(id: ID!): Boolean!
+    requestNarrativeRefresh(
+      projectId: ID!
+      scope: NarrativeScope!
+      snapshotId: ID
+      persona: String
+      days: Int
+      force: Boolean
+    ): NarrativeRefreshResult!
     generateDailySummaries(date: Date!, projectId: ID!): [DailySummary!]!
     regenerateDailySummary(userId: ID!, date: Date!, projectId: ID!): DailySummary!
     exportDailySummaries(date: Date!, projectId: ID!, target: SummaryExportTarget!): SummaryExportResult!
+    regenerateProjectSummary(projectId: ID!, date: Date): ProjectDailySummary!
+    backfillProjectSummaries(projectId: ID!, days: Int = 15): ProjectBackfillResult!
+    updateProjectSummarySchedule(projectId: ID!, input: UpdateProjectSummaryScheduleInput!): ProjectSummarySchedule!
+    triggerProjectSummaryAutomation(projectId: ID!): Boolean!
+    sendDailyNewsletter(date: Date, projectId: ID): Boolean!
+  }
+
+  type ProjectBackfillResult {
+    projectId: ID!
+    daysRequested: Int!
+    runsGenerated: Int!
   }
 `;

@@ -36,6 +36,13 @@ model Tenant {
   artifacts           Artifact[]
   issueLinks          IssueLink[]
   issueInsights       IssueInsight[]
+  issueInsightSnapshots IssueInsightSnapshot[]
+  llmSkillTraces      LlmSkillTrace[]
+  taskSummarySnapshots TaskSummarySnapshot[]
+  userSummarySnapshots UserSummarySnapshot[]
+  projectSummarySnapshots ProjectSummarySnapshot[]
+  userAvailability    UserAvailability[]
+  projectSummarySchedules ProjectSummarySchedule[]
 }
 
 model User {
@@ -49,6 +56,8 @@ model User {
   role         Role              @default(USER)
   credential   Credential?
   summaries    DailySummary[]
+  taskSummarySnapshots TaskSummarySnapshot[]
+  userSummarySnapshots UserSummarySnapshot[]
   sitesCreated JiraSite[]        @relation("SiteCreator")
   projectLinks UserProjectLink[]
   performanceNotes PerformanceReviewNote[] @relation("PerformanceNoteManager")
@@ -122,6 +131,9 @@ model JiraProject {
   createdAt      DateTime             @default(now())
   updatedAt      DateTime             @updatedAt
   summaries      DailySummary[]
+  taskSummarySnapshots TaskSummarySnapshot[]
+  userSummarySnapshots UserSummarySnapshot[]
+  projectSummarySnapshots ProjectSummarySnapshot[]
   issues         Issue[]
   site           JiraSite             @relation(fields: [siteId], references: [id])
   trackedUsers   ProjectTrackedUser[]
@@ -130,10 +142,32 @@ model JiraProject {
   syncStates     SyncState[]
   accountLinks   UserProjectLink[]
   performanceNotes PerformanceReviewNote[]
+  availability   UserAvailability[] @relation("ProjectAvailability")
+  summarySchedule ProjectSummarySchedule?
   tenant         Tenant              @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, siteId, jiraId])
   @@unique([tenantId, siteId, key])
+  @@index([tenantId])
+}
+
+model ProjectSummarySchedule {
+  id               String   @id @default(uuid())
+  tenantId         String   @default("dev")
+  projectId        String   @unique
+  frequencyMinutes Int      @default(180)
+  enabled          Boolean  @default(true)
+  nextRunAt        DateTime?
+  lastRunAt        DateTime?
+  lockedUntil      DateTime?
+  lastError        String?
+  lastErrorAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  project          JiraProject @relation(fields: [projectId], references: [id])
+
+  @@unique([tenantId, projectId])
   @@index([tenantId])
 }
 
@@ -173,6 +207,25 @@ model JiraAssignableUser {
 
   @@unique([tenantId, siteId, projectKey, accountId])
   @@index([tenantId, siteId, projectKey])
+}
+
+model UserAvailability {
+  id            String   @id @default(uuid())
+  tenantId      String   @default("dev")
+  projectId     String?
+  jiraAccountId String
+  startDate     DateTime
+  endDate       DateTime
+  type          String   @default("leave")
+  source        String   @default("manual")
+  reason        String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  project       JiraProject? @relation("ProjectAvailability", fields: [projectId], references: [id])
+
+  @@index([tenantId, jiraAccountId, startDate, endDate])
+  @@index([tenantId, projectId])
 }
 
 model Sprint {
@@ -216,6 +269,12 @@ model Issue {
   browseUrl     String?
   reporterId    String?
   parentIssueId String?
+  needsInsightRefresh Boolean   @default(false)
+  insightRefreshRequestedAt DateTime?
+  insightRefreshAttempts Int   @default(0)
+  insightRefreshLockedUntil DateTime?
+  insightRefreshedAt DateTime?
+  lastInsightError String?
   comments      Comment[]
   assignee      JiraUser?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
   reporter      JiraUser?   @relation("IssueReporter", fields: [reporterId], references: [id])
@@ -227,6 +286,8 @@ model Issue {
   sprint        Sprint?     @relation(fields: [sprintId], references: [id])
   worklogs      Worklog[]
   insight       IssueInsight?
+  insightSnapshots IssueInsightSnapshot[]
+  taskSummarySnapshots TaskSummarySnapshot[]
   tenant        Tenant      @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, jiraId])
@@ -235,6 +296,7 @@ model Issue {
   @@index([tenantId, reporterId])
   @@index([tenantId, parentIssueId])
   @@index([tenantId, dueDate])
+  @@index([tenantId, needsInsightRefresh, insightRefreshLockedUntil])
 }
 
 
@@ -260,6 +322,7 @@ model IssueInsight {
   id              String   @id @default(uuid())
   tenantId        String   @default("dev")
   issueId         String   @unique
+  latestSnapshotId String?
   summary         Json?
   sentiments      Json?
   escalationScore Float?
@@ -270,9 +333,60 @@ model IssueInsight {
   computedAt      DateTime @default(now())
   expiresAt       DateTime?
   issue           Issue    @relation(fields: [issueId], references: [id])
+  latestSnapshot  IssueInsightSnapshot? @relation("IssueInsightLatest", fields: [latestSnapshotId], references: [id])
   tenant          Tenant   @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, computedAt])
+}
+
+model IssueInsightSnapshot {
+  id               String   @id @default(uuid())
+  tenantId         String   @default("dev")
+  issueId          String
+  provider         String
+  inputsHash       String
+  summary          Json?
+  sentiments       Json?
+  escalationScore  Float?
+  signals          Json?
+  providerMetadata Json?
+  deltaSummary     Json?
+  commentCursor    String?
+  worklogCursor    String?
+  statusStage      String?
+  stageBreakdown   Json?
+  createdAt        DateTime @default(now())
+  issue            Issue    @relation(fields: [issueId], references: [id])
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  insights         IssueInsight[] @relation("IssueInsightLatest")
+
+  @@index([tenantId, issueId, createdAt])
+  @@index([tenantId, inputsHash])
+}
+
+model LlmSkillTrace {
+  id               String   @id @default(uuid())
+  tenantId         String   @default("dev")
+  traceId          String   @unique
+  skillId          String
+  skillVersion     String?
+  modelProvider    String
+  modelName        String
+  templateHash     String
+  inputHash        String
+  latencyMs        Int
+  promptTokens     Int?
+  completionTokens Int?
+  totalTokens      Int?
+  cached           Boolean  @default(false)
+  input            Json
+  output           Json
+  metadata         Json?
+  createdAt        DateTime @default(now())
+  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, skillId, createdAt])
+  @@index([tenantId, templateHash, inputHash])
 }
 
 model Comment {
@@ -347,6 +461,78 @@ model DailySummary {
 
   @@unique([tenantId, userId, projectId, date])
   @@index([tenantId, projectId])
+}
+
+model TaskSummarySnapshot {
+  id          String   @id @default(uuid())
+  tenantId    String   @default("dev")
+  projectId   String
+  issueId     String
+  userId      String?
+  summaryDate DateTime
+  runId       String
+  payload     Json
+  createdAt   DateTime @default(now())
+  project     JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issue       Issue    @relation(fields: [issueId], references: [id])
+  user        User?    @relation(fields: [userId], references: [id])
+  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, projectId, summaryDate])
+  @@index([tenantId, issueId, summaryDate])
+  @@index([tenantId, runId])
+}
+
+model UserSummarySnapshot {
+  id             String   @id @default(uuid())
+  tenantId       String   @default("dev")
+  projectId      String
+  userId         String?
+  summaryDate    DateTime
+  runId          String
+  taskSummaryIds String[]
+  payload        Json
+  narrative           String?  @db.Text
+  narrativeHash       String?
+  narrativeGeneratedAt DateTime?
+  richNarratives      Json?
+  needsNarrativeRefresh Boolean @default(true)
+  narrativeRefreshRequestedAt DateTime?
+  narrativeRefreshLockedUntil DateTime?
+  narrativeRefreshAttempts Int @default(0)
+  lastNarrativeError   String?
+  createdAt      DateTime @default(now())
+  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User?       @relation(fields: [userId], references: [id])
+  tenant         Tenant      @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, projectId, summaryDate])
+  @@index([tenantId, projectId, runId])
+}
+
+model ProjectSummarySnapshot {
+  id             String   @id @default(uuid())
+  tenantId       String   @default("dev")
+  projectId      String
+  summaryDate    DateTime
+  runId          String
+  userSummaryIds String[]
+  payload        Json
+  narrative           String?  @db.Text
+  narrativeHash       String?
+  narrativeGeneratedAt DateTime?
+  richNarratives      Json?
+  needsNarrativeRefresh Boolean @default(true)
+  narrativeRefreshRequestedAt DateTime?
+  narrativeRefreshLockedUntil DateTime?
+  narrativeRefreshAttempts Int @default(0)
+  lastNarrativeError   String?
+  createdAt      DateTime @default(now())
+  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tenant         Tenant      @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, projectId, runId])
+  @@index([tenantId, projectId, summaryDate])
 }
 
 model PerformanceReviewNote {

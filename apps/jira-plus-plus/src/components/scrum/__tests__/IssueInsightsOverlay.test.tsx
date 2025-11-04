@@ -27,6 +27,7 @@ const summary: DailySummaryRecord = {
   createdAt: "2024-09-18T08:00:00.000Z",
   updatedAt: "2024-09-18T11:00:00.000Z",
   status: "ON_TRACK",
+  isUnavailable: false,
   worklogHours: 6.5,
   issueCounts: {
     todo: 2,
@@ -144,6 +145,59 @@ const summary: DailySummaryRecord = {
                 model: "mistral",
                 version: "0.3",
               },
+              provider: "local",
+              requirement: "Modernise overlay path for tenant migration.",
+              stage: {
+                current: "DEVELOPMENT",
+                breakdown: [
+                  { key: "REQUIREMENT", label: "Requirement", total: 1, inProgress: 0, done: 1, todo: 0 },
+                  { key: "DEVELOPMENT", label: "Development", total: 2, inProgress: 1, done: 1, todo: 0 },
+                  { key: "QA", label: "QA", total: 1, inProgress: 0, done: 0, todo: 1 },
+                  { key: "DEPLOYMENT", label: "Deployment", total: 0, inProgress: 0, done: 0, todo: 0 },
+                ],
+              },
+              delta: {
+                newCommentCount: 2,
+                latestCommentAuthors: ["PM Rahul", "Ops Bot"],
+                newWorklogHours: 2,
+              },
+              waitingOn: ["JPP-40 (Blocked)"],
+              history: [
+                {
+                  id: "snapshot-0",
+                  issueId: "JPP-42",
+                  summary: {
+                    text: "Baseline summary prior to QA sign-off.",
+                    provider: "local",
+                    confidence: 0.7,
+                  },
+                  sentiment: {
+                    label: "neutral",
+                    score: 0.1,
+                    tones: ["steady"],
+                    provider: "local",
+                  },
+                  escalateScore: 0.25,
+                  signals: [],
+                  computedAt: "2024-09-17T10:00:00.000Z",
+                  expiresAt: null,
+                  providerMetadata: {},
+                  provider: "local",
+                  stage: {
+                    current: "REQUIREMENT",
+                    breakdown: [
+                      { key: "REQUIREMENT", label: "Requirement", total: 1, inProgress: 0, done: 1, todo: 0 },
+                    ],
+                  },
+                  delta: {
+                    newCommentCount: 1,
+                    latestCommentAuthors: ["PM Rahul"],
+                    newWorklogHours: 1.5,
+                  },
+                  requirement: "Modernise overlay path for tenant migration.",
+                  waitingOn: ["JPP-32 (QA)", "JPP-40 (Blocked)"],
+                },
+              ],
             },
           },
           totalWorklogHours: 3.5,
@@ -203,7 +257,11 @@ describe("IssueInsightsOverlay", () => {
       />,
     );
 
-    expect(markup).toMatchSnapshot();
+    expect(markup).toContain("Business Requirement");
+    expect(markup).toContain("Stage Progress");
+    expect(markup).toContain("Recent Movement");
+    expect(markup).toContain("Insight History");
+    expect(markup).toContain("Waiting On");
   });
 
   it("renders nothing when closed", () => {

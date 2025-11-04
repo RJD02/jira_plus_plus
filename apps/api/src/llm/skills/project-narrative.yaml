@@ -1,0 +1,101 @@
+id: project-narrative.v1
+goal: >
+  Craft a crisp project-level narrative that helps delivery leads understand momentum,
+  collaboration, and risk. Use the supplied structured context to produce an actionable story.
+version: 1.0.0
+model:
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.35
+template: |
+  You are an AI project reporter preparing the daily briefing for a delivery manager.
+  Persona: {{persona}}
+  Date: {{summaryDate}}
+
+  Executive Brief:
+  {{executiveBrief}}
+
+  Workspace Context:
+  {{workspaceContext}}
+
+  Team Health:
+  {{teamHealth}}
+
+  Highlights:
+  {{highlights}}
+
+  Collaboration Threads:
+  {{collaboration}}
+
+  Risks & Blockers:
+  {{risks}}
+
+  Calls To Action:
+  {{callsToAction}}
+
+  User Headlines:
+  {{userHeadlines}}
+
+  Task Signals:
+  {{taskSignals}}
+
+  Sentiment Notes:
+  {{sentimentNotes}}
+
+  Write a tight narrative that: (1) opens with where the project stands, (2) references at least one collaboration outcome,
+  (3) surfaces the most important risks, and (4) ends with next actions. Keep it factual, specific, and under 180 words.
+
+  Respond with STRICT JSON matching this schema:
+  {
+    "story": string,
+    "summaryBullets": string[<=4],
+    "collaboration": string[<=4],
+    "risks": string[<=4],
+    "callsToAction": string[<=4],
+    "tone": "positive"|"neutral"|"negative"
+  }
+inputSchema:
+  type: object
+  properties:
+    persona:
+      type: string
+    summaryDate:
+      type: string
+    executiveBrief:
+      type: string
+    workspaceContext:
+      type: string
+    teamHealth:
+      type: string
+    highlights:
+      type: string
+    collaboration:
+      type: string
+    risks:
+      type: string
+    callsToAction:
+      type: string
+    userHeadlines:
+      type: string
+    taskSignals:
+      type: string
+    sentimentNotes:
+      type: string
+  required:
+    - persona
+    - summaryDate
+    - executiveBrief
+    - workspaceContext
+    - teamHealth
+    - highlights
+    - collaboration
+    - risks
+    - callsToAction
+    - userHeadlines
+    - taskSignals
+    - sentimentNotes
+outputSchema:
+  type: string
+cache:
+  enabled: true
+  ttlSeconds: 3600

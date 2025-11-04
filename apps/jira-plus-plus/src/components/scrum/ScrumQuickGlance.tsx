@@ -1,5 +1,5 @@
 import clsx from 'clsx';
-import { CheckCircle2, AlarmClock, AlertTriangle, Clock4 } from 'lucide-react';
+import { CheckCircle2, AlarmClock, AlertTriangle, Clock4, Moon } from 'lucide-react';
 import { DailySummaryRecord } from '../../types/scrum';
 
 interface ScrumQuickGlanceProps {
@@ -10,30 +10,66 @@ interface ScrumQuickGlanceProps {
 
 const STATUS_META: Record<
   DailySummaryRecord['status'],
-  { icon: typeof CheckCircle2; pill: string; iconColor: string }
+  { icon: typeof CheckCircle2; pill: string; iconColor: string; label: string }
 > = {
   ON_TRACK: {
     icon: CheckCircle2,
     pill: 'bg-emerald-100 text-emerald-700 dark:bg-emerald-900/40 dark:text-emerald-200',
     iconColor: 'text-emerald-600 dark:text-emerald-300',
+    label: 'On Track',
   },
   DELAYED: {
     icon: Clock4,
     pill: 'bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200',
     iconColor: 'text-amber-600 dark:text-amber-300',
+    label: 'Delayed',
   },
   BLOCKED: {
     icon: AlertTriangle,
     pill: 'bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200',
     iconColor: 'text-rose-600 dark:text-rose-300',
+    label: 'Blocked',
+  },
+  OFFLINE: {
+    icon: Moon,
+    pill: 'bg-slate-200 text-slate-700 dark:bg-slate-900/50 dark:text-slate-300',
+    iconColor: 'text-slate-500 dark:text-slate-400',
+    label: 'Out of office',
   },
 };
 
 export function ScrumQuickGlance({ summaries, selectedId, onSelect }: ScrumQuickGlanceProps) {
+  const interactionScore = (summary: DailySummaryRecord) => {
+    let interactions = 0;
+    for (const group of summary.workItems) {
+      for (const item of group.items) {
+        interactions += item.recentWorklogs.length + item.recentComments.length;
+      }
+    }
+    const pendingActive = summary.issueCounts.todo + summary.issueCounts.inProgress;
+    return interactions * 10 + pendingActive - summary.issueCounts.blocked;
+  };
+
+  const orderedSummaries = summaries
+    .slice()
+    .sort((a, b) => {
+      const worklogDelta = b.worklogHours - a.worklogHours;
+      if (Math.abs(worklogDelta) > 0.01) {
+        return worklogDelta;
+      }
+
+      const scoreDelta = interactionScore(b) - interactionScore(a);
+      if (scoreDelta !== 0) {
+        return scoreDelta;
+      }
+
+      return (b.issueCounts.todo + b.issueCounts.inProgress) - (a.issueCounts.todo + a.issueCounts.inProgress);
+    });
+
   return (
     <div className="overflow-x-auto pb-1">
       <div className="flex snap-x snap-mandatory gap-2 pr-4">
-        {summaries.map((summary) => {
+        {orderedSummaries.map((summary) => {
           const displayName =
             summary.user?.displayName ?? summary.trackedUser?.displayName ?? 'Unassigned';
           const pendingCount = summary.issueCounts.todo + summary.issueCounts.inProgress;
@@ -66,13 +102,7 @@ export function ScrumQuickGlance({ summaries, selectedId, onSelect }: ScrumQuick
                       'inline-flex items-center gap-1 rounded-full px-2.5 py-0.5 text-[11px]',
                       statusMeta.pill,
                     )}
-                    title={
-                      summary.status === 'ON_TRACK'
-                        ? 'On Track'
-                        : summary.status === 'DELAYED'
-                          ? 'Delayed'
-                          : 'Blocked'
-                    }
+                    title={statusMeta.label}
                   >
                     <StatusIcon className={clsx('h-3.5 w-3.5', statusMeta.iconColor)} />
                   </div>

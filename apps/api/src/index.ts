@@ -20,6 +20,7 @@ import {
   generatePerformanceSummary,
   savePerformanceNote,
 } from "./services/performanceReviewService.js";
+import { ensureProjectSummaryAutomationSchedule } from "./services/projectSummaryAutomationService.js";
 
 function todayIsoDate() {
   return new Date().toISOString().slice(0, 10);
@@ -48,6 +49,11 @@ async function bootstrap() {
   const env = getEnv();
 
   await seedAdminUser();
+  try {
+    await ensureProjectSummaryAutomationSchedule();
+  } catch (error) {
+    console.error("Failed to ensure project summary automation schedule", error);
+  }
 
   const apollo = new ApolloServer({ schema });
   await apollo.start();

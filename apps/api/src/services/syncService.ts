@@ -142,10 +142,16 @@ export async function rescheduleProjectSync(
   await updateNextRunFromSchedule(prisma, projectId);
 }
 
+interface TriggerSyncOptions {
+  full?: boolean;
+  accountIds?: string[];
+  days?: number | null;
+}
+
 export async function triggerProjectSync(
   prisma: PrismaClient,
   projectId: string,
-  options: { full?: boolean; accountIds?: string[] } = {},
+  options: TriggerSyncOptions = {},
 ) {
   let job = await prisma.syncJob.findUnique({ where: { projectId } });
   if (!job) {
@@ -153,6 +159,16 @@ export async function triggerProjectSync(
     job = await prisma.syncJob.findUnique({ where: { projectId } });
     if (!job) {
       throw new Error("Sync job not found");
+    }
+  }
+
+  let fullResync = options.full ?? false;
+  let lookbackDays: number | null = null;
+  if (typeof options.days === "number") {
+    if (options.days < 0) {
+      fullResync = true;
+    } else {
+      lookbackDays = options.days;
     }
   }
 
@@ -164,8 +180,9 @@ export async function triggerProjectSync(
     args: [
       {
         projectId,
-        fullResync: options.full ?? false,
+        fullResync,
         accountIds: options.accountIds ?? null,
+        lookbackDays,
       },
     ],
   });
@@ -176,8 +193,9 @@ export async function triggerProjectSync(
       level: "INFO",
       message: "Manual sync triggered",
       details: {
-        full: options.full ?? false,
+        full: fullResync,
         accountIds: options.accountIds,
+        days: options.days ?? null,
       },
     },
   });

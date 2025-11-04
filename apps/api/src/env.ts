@@ -29,13 +29,19 @@ const envSchema = z.object({
   JIRA_API_TOKEN: z.string().min(1, "JIRA_API_TOKEN is required"),
   OPENAI_API_KEY: z.string().optional(),
   OPENAI_MODEL: z.string().default("gpt-4o-mini"),
-  LOCAL_LLM_URL: z.string().default("http://localhost:11434/api/generate"),
-  LOCAL_LLM_MODEL: z.string().default("mistral"),
+  OLLAMA_BASE_URL: z.string().default("http://localhost:11434"),
+  OLLAMA_MODEL: z.string().default("mistral"),
+  ANTHROPIC_MODEL: z.string().default("claude-3-haiku-20240307"),
+  ANTHROPIC_API_KEY: z.string().optional(),
   INSIGHTS_LOCAL_TIMEOUT_MS: z.coerce.number().default(120000),
   INSIGHTS_PROVIDER: z
     .enum(["auto", "openai", "local"])
     .default("local"),
   INSIGHTS_CACHE_TTL_MINUTES: z.coerce.number().default(720),
+  NARRATIVE_PROVIDER: z
+    .enum(["auto", "openai", "anthropic", "ollama", "local"])
+    .default("auto"),
+  NARRATIVE_MODEL: z.string().default("gpt-4o-mini"),
   SESSION_SECRET: z.string().min(32, "SESSION_SECRET must be at least 32 characters"),
   ENCRYPTION_SECRET: z.string().min(32, "ENCRYPTION_SECRET must be at least 32 characters"),
   ADMIN_EMAIL: z.string().email(),

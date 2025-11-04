@@ -1,5 +1,5 @@
 export { ScrumHeader } from "./ScrumHeader";
-export { AISummaryPanel } from "./AISummaryPanel";
+export { AISummaryPanel, formatNarrativeContent } from "./AISummaryPanel";
 export { AISummaryDrawer } from "./AISummaryDrawer";
 export { SummaryExport } from "./SummaryExport";
 export { UserSummaryCard } from "./UserSummaryCard";

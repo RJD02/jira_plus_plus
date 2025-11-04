@@ -1,0 +1,109 @@
+id: user-narrative.v1
+goal: >
+  Produce a daily chapter describing an individual contributor's progress, collaborators,
+  and upcoming focus so their lead can skim and spot issues quickly.
+version: 1.0.0
+model:
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.3
+template: |
+  You are an assistant drafting a stand-up update for {{persona}}.
+  Date: {{summaryDate}}
+  Teammate: {{displayName}}
+
+  Headline:
+  {{headline}}
+
+  Metrics:
+  {{metrics}}
+
+  Accomplishments:
+  {{accomplishments}}
+
+  In Flight:
+  {{inFlight}}
+
+  Blockers:
+  {{blockers}}
+
+  Collaboration Notes:
+  {{collaborationNotes}}
+
+  Pending Decisions:
+  {{pendingDecisions}}
+
+  Mood + Sentiment:
+  {{mood}}
+
+  Task Highlights:
+  {{taskHighlights}}
+
+  Risk Flags:
+  {{riskFlags}}
+
+  Next Focus Guidance:
+  {{focusNext}}
+
+  Write a concise story (max 140 words) that opens with what moved, cites the most important task,
+  names collaborators when relevant, and finishes with what needs attention next. Maintain a neutral tone.
+
+  Respond with STRICT JSON matching this schema:
+  {
+    "story": string,
+    "spotlight": string[<=4],
+    "risks": string[<=4],
+    "nextMoves": string[<=4],
+    "tone": "positive"|"neutral"|"negative"
+  }
+inputSchema:
+  type: object
+  properties:
+    persona:
+      type: string
+    summaryDate:
+      type: string
+    displayName:
+      type: string
+    headline:
+      type: string
+    metrics:
+      type: string
+    accomplishments:
+      type: string
+    inFlight:
+      type: string
+    blockers:
+      type: string
+    collaborationNotes:
+      type: string
+    pendingDecisions:
+      type: string
+    mood:
+      type: string
+    taskHighlights:
+      type: string
+    riskFlags:
+      type: string
+    focusNext:
+      type: string
+  required:
+    - persona
+    - summaryDate
+    - displayName
+    - headline
+    - metrics
+    - accomplishments
+    - inFlight
+    - blockers
+    - collaborationNotes
+    - pendingDecisions
+    - mood
+    - taskHighlights
+    - riskFlags
+    - focusNext
+outputSchema:
+  type: string
+cache:
+  enabled: true
+  ttlSeconds: 3600

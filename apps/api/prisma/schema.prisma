@@ -18,6 +18,8 @@ model User {
   role         Role              @default(USER)
   credential   Credential?
   summaries    DailySummary[]
+  taskSummarySnapshots TaskSummarySnapshot[]
+  userSummarySnapshots UserSummarySnapshot[]
   sitesCreated JiraSite[]        @relation("SiteCreator")
   projectLinks UserProjectLink[]
   performanceNotes PerformanceReviewNote[] @relation("PerformanceNoteManager")
@@ -71,6 +73,9 @@ model JiraProject {
   createdAt    DateTime             @default(now())
   updatedAt    DateTime             @updatedAt
   summaries    DailySummary[]
+  taskSummarySnapshots TaskSummarySnapshot[]
+  userSummarySnapshots UserSummarySnapshot[]
+  projectSummarySnapshots ProjectSummarySnapshot[]
   issues       Issue[]
   site         JiraSite             @relation(fields: [siteId], references: [id])
   trackedUsers ProjectTrackedUser[]
@@ -79,9 +84,27 @@ model JiraProject {
   syncStates   SyncState[]
   accountLinks UserProjectLink[]
   performanceNotes PerformanceReviewNote[]
+  summarySchedule ProjectSummarySchedule?
 
   @@unique([siteId, jiraId])
   @@unique([siteId, key])
+}
+
+model ProjectSummarySchedule {
+  id               String   @id @default(uuid())
+  projectId        String   @unique
+  frequencyMinutes Int      @default(180)
+  enabled          Boolean  @default(true)
+  nextRunAt        DateTime?
+  lastRunAt        DateTime?
+  lockedUntil      DateTime?
+  lastError        String?
+  lastErrorAt      DateTime?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+  project          JiraProject @relation(fields: [projectId], references: [id])
+
+  @@unique([projectId])
 }
 
 model ProjectTrackedUser {
@@ -162,6 +185,7 @@ model Issue {
   project          JiraProject @relation(fields: [projectId], references: [id])
   sprint           Sprint?     @relation(fields: [sprintId], references: [id])
   worklogs         Worklog[]
+  taskSummarySnapshots TaskSummarySnapshot[]
 }
 
 
@@ -234,6 +258,54 @@ model DailySummary {
   user      User        @relation(fields: [userId], references: [id])
 
   @@unique([userId, projectId, date])
+}
+
+model TaskSummarySnapshot {
+  id          String   @id @default(uuid())
+  projectId   String
+  issueId     String
+  userId      String?
+  summaryDate DateTime
+  runId       String
+  payload     Json
+  createdAt   DateTime @default(now())
+  project     JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  issue       Issue    @relation(fields: [issueId], references: [id])
+  user        User?    @relation(fields: [userId], references: [id])
+
+  @@index([projectId, summaryDate])
+  @@index([issueId, summaryDate])
+  @@index([runId])
+}
+
+model UserSummarySnapshot {
+  id             String   @id @default(uuid())
+  projectId      String
+  userId         String?
+  summaryDate    DateTime
+  runId          String
+  taskSummaryIds String[]
+  payload        Json
+  createdAt      DateTime @default(now())
+  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user           User?       @relation(fields: [userId], references: [id])
+
+  @@index([projectId, summaryDate])
+  @@index([projectId, runId])
+}
+
+model ProjectSummarySnapshot {
+  id             String   @id @default(uuid())
+  projectId      String
+  summaryDate    DateTime
+  runId          String
+  userSummaryIds String[]
+  payload        Json
+  createdAt      DateTime @default(now())
+  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, runId])
+  @@index([projectId, summaryDate])
 }
 
 model PerformanceReviewNote {

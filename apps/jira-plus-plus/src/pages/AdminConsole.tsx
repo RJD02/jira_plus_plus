@@ -5,8 +5,9 @@ import {
   type FormEvent,
   type ReactNode,
 } from "react";
+import clsx from "clsx";
 import { gql, useLazyQuery, useMutation, useQuery } from "@apollo/client";
-import { BarChart3, Link2, PlusCircle, ServerCog, ShieldCheck, Users } from "lucide-react";
+import { BarChart3, Clock3, Link2, Mail, PlusCircle, ServerCog, ShieldCheck, Users } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Modal } from "../components/ui/modal";
 import { useAuth } from "../providers/AuthProvider";
@@ -54,6 +55,15 @@ const ADMIN_CONSOLE_QUERY = gql`
           entity
           status
           lastSyncTime
+        }
+        summarySchedule {
+          id
+          frequencyMinutes
+          enabled
+          nextRunAt
+          lastRunAt
+          lastError
+          lastErrorAt
         }
       }
     }
@@ -155,8 +165,38 @@ const RESCHEDULE_SYNC_MUTATION = gql`
 `;
 
 const TRIGGER_SYNC_MUTATION = gql`
-  mutation TriggerProjectSync($projectId: ID!, $full: Boolean, $accountIds: [String!]) {
-    triggerProjectSync(projectId: $projectId, full: $full, accountIds: $accountIds)
+  mutation TriggerProjectSync($projectId: ID!, $full: Boolean, $accountIds: [String!], $days: Int) {
+    triggerProjectSync(projectId: $projectId, full: $full, accountIds: $accountIds, days: $days)
+  }
+`;
+
+const BACKFILL_SUMMARIES_MUTATION = gql`
+  mutation BackfillProjectSummaries($projectId: ID!, $days: Int) {
+    backfillProjectSummaries(projectId: $projectId, days: $days) {
+      projectId
+      daysRequested
+      runsGenerated
+    }
+  }
+`;
+
+const UPDATE_PROJECT_SUMMARY_SCHEDULE_MUTATION = gql`
+  mutation UpdateProjectSummarySchedule($projectId: ID!, $input: UpdateProjectSummaryScheduleInput!) {
+    updateProjectSummarySchedule(projectId: $projectId, input: $input) {
+      id
+      frequencyMinutes
+      enabled
+      nextRunAt
+      lastRunAt
+      lastError
+      lastErrorAt
+    }
+  }
+`;
+
+const TRIGGER_PROJECT_SUMMARY_AUTOMATION_MUTATION = gql`
+  mutation TriggerProjectSummaryAutomation($projectId: ID!) {
+    triggerProjectSummaryAutomation(projectId: $projectId)
   }
 `;
 
@@ -192,6 +232,53 @@ const PROJECT_USERS_OPTIONS_QUERY = gql`
       email
       avatarUrl
     }
+  }
+`;
+
+const USER_AVAILABILITY_QUERY = gql`
+  query UserAvailability($accountId: String, $from: Date, $to: Date) {
+    userAvailability(accountId: $accountId, from: $from, to: $to) {
+      id
+      projectId
+      jiraAccountId
+      startDate
+      endDate
+      type
+      reason
+      createdAt
+      updatedAt
+      project {
+        id
+        key
+        name
+      }
+    }
+  }
+`;
+
+const CREATE_USER_AVAILABILITY_MUTATION = gql`
+  mutation CreateUserAvailability($input: CreateUserAvailabilityInput!) {
+    createUserAvailability(input: $input) {
+      id
+      projectId
+      jiraAccountId
+      startDate
+      endDate
+      type
+      reason
+    }
+  }
+`;
+
+const DELETE_USER_AVAILABILITY_MUTATION = gql`
+  mutation DeleteUserAvailability($id: ID!) {
+    deleteUserAvailability(id: $id)
+  }
+`;
+
+const SEND_NEWSLETTER_MUTATION = gql`
+  mutation SendDailyNewsletter($date: Date, $projectId: ID) {
+    sendDailyNewsletter(date: $date, projectId: $projectId)
   }
 `;
 
@@ -287,6 +374,15 @@ type AdminConsoleData = {
         status: string;
         lastSyncTime: string | null;
       }>;
+      summarySchedule: {
+        id: string;
+        frequencyMinutes: number;
+        enabled: boolean;
+        nextRunAt: string | null;
+        lastRunAt: string | null;
+        lastError: string | null;
+        lastErrorAt: string | null;
+      } | null;
     }>;
   }>;
 };
@@ -343,20 +439,71 @@ type SyncLogsData = {
   }>;
 };
 
+type UserAvailabilityRecord = {
+  id: string;
+  projectId: string | null;
+  jiraAccountId: string;
+  startDate: string;
+  endDate: string;
+  type: string | null;
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+  project?: {
+    id: string;
+    key: string;
+    name: string;
+  } | null;
+};
+
+type NormalizedAvailabilityRecord = UserAvailabilityRecord & { type: string };
+
 type ModalType = "site" | "user" | "project" | "mapping" | null;
+
+type ProjectSummaryModalState = {
+  projectId: string;
+  projectKey: string;
+  projectName: string;
+  siteAlias: string;
+  schedule: {
+    id: string;
+    frequencyMinutes: number;
+    enabled: boolean;
+    nextRunAt: string | null;
+    lastRunAt: string | null;
+    lastError: string | null;
+    lastErrorAt: string | null;
+  } | null;
+};
 
 const sidebarSections = [
   { id: "overview", label: "Overview", icon: <ShieldCheck className="h-4 w-4" /> },
   { id: "sites", label: "Jira Sites", icon: <ServerCog className="h-4 w-4" /> },
   { id: "projects", label: "Projects", icon: <BarChart3 className="h-4 w-4" /> },
   { id: "users", label: "Directory", icon: <Users className="h-4 w-4" /> },
+  { id: "availability", label: "Availability", icon: <Clock3 className="h-4 w-4" /> },
+  { id: "newsletter", label: "Newsletter", icon: <Mail className="h-4 w-4" /> },
   { id: "mappings", label: "Account Mapping", icon: <Link2 className="h-4 w-4" /> },
 ] as const;
 
 const dateFormatter = new Intl.DateTimeFormat("en-US", { dateStyle: "medium" });
+const dateTimeFormatter = new Intl.DateTimeFormat("en-US", {
+  dateStyle: "medium",
+  timeStyle: "short",
+});
 const formatDate = (value: string) => {
   try {
     return dateFormatter.format(new Date(value));
+  } catch {
+    return value;
+  }
+};
+const formatDateTime = (value: string | null | undefined) => {
+  if (!value) {
+    return "—";
+  }
+  try {
+    return dateTimeFormatter.format(new Date(value));
   } catch {
     return value;
   }
@@ -378,6 +525,9 @@ export function AdminConsolePage() {
       }
     | null
   >(null);
+  const [projectSummaryModal, setProjectSummaryModal] = useState<ProjectSummaryModalState | null>(
+    null,
+  );
   const [projectSyncModal, setProjectSyncModal] = useState<
     | {
         projectId: string;
@@ -407,6 +557,33 @@ export function AdminConsolePage() {
   const [resettingUserId, setResettingUserId] = useState<string | null>(null);
   const [userActionMessage, setUserActionMessage] = useState<string | null>(null);
   const [userActionError, setUserActionError] = useState<string | null>(null);
+  const [availabilityAccountFilter, setAvailabilityAccountFilter] = useState<string>("");
+  const [availabilityFrom, setAvailabilityFrom] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [availabilityTo, setAvailabilityTo] = useState<string>("");
+  const [availabilityForm, setAvailabilityForm] = useState({
+    projectId: "",
+    accountId: "",
+    startDate: "",
+    endDate: "",
+    type: "leave",
+    reason: "",
+  });
+  const [newsletterDate, setNewsletterDate] = useState<string>(() => new Date().toISOString().slice(0, 10));
+  const [newsletterProjectId, setNewsletterProjectId] = useState<string>("");
+  const [availabilityDeletingId, setAvailabilityDeletingId] = useState<string | null>(null);
+  const [availabilityMessage, setAvailabilityMessage] = useState<string | null>(null);
+  const [availabilityError, setAvailabilityError] = useState<string | null>(null);
+  const [showWeekendEntries, setShowWeekendEntries] = useState<boolean>(false);
+  const [newsletterMessage, setNewsletterMessage] = useState<string | null>(null);
+  const [newsletterError, setNewsletterError] = useState<string | null>(null);
+  const [weekendForm, setWeekendForm] = useState({
+    projectId: "",
+    startDate: "",
+    endDate: "",
+    saturday: true,
+    sunday: true,
+  });
+  const [weekendSubmitting, setWeekendSubmitting] = useState(false);
 
   const [fetchLinks, { data: linkData, loading: linksLoading, refetch: refetchLinks }] =
     useLazyQuery<UserProjectLinksData>(USER_LINKS_QUERY);
@@ -416,6 +593,30 @@ export function AdminConsolePage() {
       void fetchLinks({ variables: { userId: selectedUserId } });
     }
   }, [fetchLinks, selectedUserId]);
+
+  const {
+    data: availabilityData,
+    loading: availabilityLoading,
+    refetch: refetchAvailability,
+  } = useQuery(USER_AVAILABILITY_QUERY, {
+    variables: {
+      accountId: availabilityAccountFilter.trim() || undefined,
+      from: availabilityFrom || undefined,
+      to: availabilityTo || undefined,
+    },
+  });
+
+  const [createAvailability, { loading: creatingAvailability }] = useMutation(
+    CREATE_USER_AVAILABILITY_MUTATION,
+  );
+  const [deleteAvailability] = useMutation(DELETE_USER_AVAILABILITY_MUTATION);
+  const [sendNewsletter, { loading: sendingNewsletter }] = useMutation(SEND_NEWSLETTER_MUTATION);
+  const [updateSummarySchedule, { loading: updatingSummarySchedule }] = useMutation(
+    UPDATE_PROJECT_SUMMARY_SCHEDULE_MUTATION,
+  );
+  const [triggerSummaryAutomation, { loading: triggeringSummaryAutomation }] = useMutation(
+    TRIGGER_PROJECT_SUMMARY_AUTOMATION_MUTATION,
+  );
 
   const sites = data?.jiraSites ?? ([] as AdminConsoleData["jiraSites"]);
   const users = data?.users ?? ([] as AdminConsoleData["users"]);
@@ -429,10 +630,68 @@ export function AdminConsolePage() {
           trackedUsers: project.trackedUsers ?? [],
           syncJob: project.syncJob ?? null,
           syncStates: project.syncStates ?? [],
+          summarySchedule: project.summarySchedule ?? null,
         })),
       ),
     [data?.jiraSites],
   );
+
+  useEffect(() => {
+    if (!projects.length) {
+      return;
+    }
+    setAvailabilityForm((prev) => {
+      if (prev.projectId) {
+        return prev;
+      }
+      const firstProject = projects[0];
+      return {
+        ...prev,
+        projectId: firstProject.id,
+        accountId: firstProject.trackedUsers?.[0]?.jiraAccountId ?? prev.accountId,
+      };
+    });
+    setWeekendForm((prev) => {
+      if (prev.projectId) {
+        return prev;
+      }
+      const firstProject = projects[0];
+      return {
+        ...prev,
+        projectId: firstProject.id,
+      };
+    });
+  }, [projects]);
+  const availabilityEntries: UserAvailabilityRecord[] = availabilityData?.userAvailability ?? [];
+  const { visibleEntries: filteredAvailabilityEntries, weekendCount } = useMemo<{
+    visibleEntries: NormalizedAvailabilityRecord[];
+    weekendCount: number;
+  }>(() => {
+    const normalized: NormalizedAvailabilityRecord[] = availabilityEntries.map((entry) => ({
+      ...entry,
+      type: entry.type?.toLowerCase() ?? "leave",
+    }));
+    const weekendCount = normalized.filter((entry) => entry.type === "weekend").length;
+    return {
+      visibleEntries: showWeekendEntries
+        ? normalized
+        : normalized.filter((entry) => entry.type !== "weekend"),
+      weekendCount,
+    };
+  }, [availabilityEntries, showWeekendEntries]);
+  const hiddenWeekendCount = showWeekendEntries ? 0 : weekendCount;
+  const availabilityProject = availabilityForm.projectId
+    ? projects.find((project) => project.id === availabilityForm.projectId) ?? null
+    : null;
+  const availabilityAccounts =
+    availabilityProject?.trackedUsers?.map((user) => ({
+      accountId: user.jiraAccountId,
+      label: `${user.displayName} (${user.jiraAccountId})`,
+    })) ?? [];
+  const weekendProject = weekendForm.projectId
+    ? projects.find((project) => project.id === weekendForm.projectId) ?? null
+    : null;
+  const weekendTrackedUsers = (weekendProject?.trackedUsers ?? []).filter((user) => user.isTracked);
 
   const selectedUser = selectedUserId
     ? users.find((candidate) => candidate.id === selectedUserId) ?? null
@@ -443,6 +702,7 @@ export function AdminConsolePage() {
     { label: "Projects", value: projects.length, caption: "Curated workstreams" },
     { label: "Platform Users", value: users.length, caption: "Provisioned teammates" },
   ];
+  const MAX_WEEKEND_RANGE_DAYS = 120;
 
   const handleResetPassword = async (userId: string, email: string) => {
     setUserActionMessage(null);
@@ -459,6 +719,177 @@ export function AdminConsolePage() {
       setUserActionError(message);
     } finally {
       setResettingUserId(null);
+    }
+  };
+
+  const handleAvailabilitySubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAvailabilityMessage(null);
+    setAvailabilityError(null);
+
+    if (!availabilityForm.projectId) {
+      setAvailabilityError("Select a project before creating availability.");
+      return;
+    }
+    if (!availabilityForm.accountId.trim() || !availabilityForm.startDate || !availabilityForm.endDate) {
+      setAvailabilityError("Account, start date, and end date are required.");
+      return;
+    }
+
+    try {
+      await createAvailability({
+        variables: {
+          input: {
+            projectId: availabilityForm.projectId,
+            jiraAccountId: availabilityForm.accountId.trim(),
+            startDate: new Date(`${availabilityForm.startDate}T00:00:00Z`),
+            endDate: new Date(`${availabilityForm.endDate}T23:59:59Z`),
+            type: availabilityForm.type.trim() || undefined,
+            reason: availabilityForm.reason.trim() || undefined,
+          },
+        },
+      });
+      setAvailabilityForm((prev) => ({
+        projectId: prev.projectId,
+        accountId: prev.accountId,
+        startDate: "",
+        endDate: "",
+        type: "leave",
+        reason: "",
+      }));
+      await refetchAvailability();
+      setAvailabilityMessage("Availability recorded.");
+    } catch (mutationError) {
+      const message =
+        mutationError instanceof Error ? mutationError.message : "Failed to record availability.";
+      setAvailabilityError(message);
+    }
+  };
+
+  const handleAvailabilityDelete = async (id: string) => {
+    setAvailabilityMessage(null);
+    setAvailabilityError(null);
+    setAvailabilityDeletingId(id);
+    try {
+      await deleteAvailability({ variables: { id } });
+      await refetchAvailability();
+      setAvailabilityMessage("Availability entry removed.");
+    } catch (mutationError) {
+      const message =
+        mutationError instanceof Error ? mutationError.message : "Failed to remove availability entry.";
+      setAvailabilityError(message);
+    } finally {
+      setAvailabilityDeletingId(null);
+    }
+  };
+
+  const handleNewsletterSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setNewsletterMessage(null);
+    setNewsletterError(null);
+    try {
+      await sendNewsletter({
+        variables: {
+          date: newsletterDate || undefined,
+          projectId: newsletterProjectId || undefined,
+        },
+      });
+      setNewsletterMessage("Newsletter dispatched.");
+    } catch (mutationError) {
+      const message =
+        mutationError instanceof Error ? mutationError.message : "Failed to send daily newsletter.";
+      setNewsletterError(message);
+    }
+  };
+
+  const handleWeekendProvision = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setAvailabilityMessage(null);
+    setAvailabilityError(null);
+
+    if (!weekendForm.projectId) {
+      setAvailabilityError("Select a project to generate weekend availability.");
+      return;
+    }
+    if (!weekendForm.startDate) {
+      setAvailabilityError("Provide a start date for the weekend range.");
+      return;
+    }
+    const endDateValue = weekendForm.endDate || weekendForm.startDate;
+    const selectedDays: number[] = [];
+    if (weekendForm.saturday) selectedDays.push(6);
+    if (weekendForm.sunday) selectedDays.push(0);
+    if (selectedDays.length === 0) {
+      setAvailabilityError("Select at least one weekend day.");
+      return;
+    }
+    const project = weekendProject;
+    if (!project) {
+      setAvailabilityError("Unable to resolve project selection.");
+      return;
+    }
+    const trackedUsers = (project.trackedUsers ?? []).filter((user) => user.isTracked);
+    if (!trackedUsers.length) {
+      setAvailabilityError("This project has no tracked teammates to update.");
+      return;
+    }
+
+    const start = new Date(`${weekendForm.startDate}T00:00:00Z`);
+    const end = new Date(`${endDateValue}T00:00:00Z`);
+    if (Number.isNaN(start.getTime()) || Number.isNaN(end.getTime())) {
+      setAvailabilityError("Invalid date range provided.");
+      return;
+    }
+    if (end < start) {
+      setAvailabilityError("End date must not be before start date.");
+      return;
+    }
+
+    const dayMs = 24 * 60 * 60 * 1000;
+    const rangeDays = Math.floor((end.getTime() - start.getTime()) / dayMs) + 1;
+    if (rangeDays > MAX_WEEKEND_RANGE_DAYS) {
+      setAvailabilityError(`Weekend provisioning is limited to ${MAX_WEEKEND_RANGE_DAYS} days at a time.`);
+      return;
+    }
+
+    setWeekendSubmitting(true);
+    try {
+      let created = 0;
+      for (let day = start.getTime(); day <= end.getTime(); day += dayMs) {
+        const date = new Date(day);
+        if (!selectedDays.includes(date.getUTCDay())) {
+          continue;
+        }
+        const isoDay = date.toISOString().slice(0, 10);
+        for (const user of trackedUsers) {
+          await createAvailability({
+            variables: {
+              input: {
+                projectId: weekendForm.projectId,
+                jiraAccountId: user.jiraAccountId,
+                startDate: new Date(`${isoDay}T00:00:00Z`),
+                endDate: new Date(`${isoDay}T23:59:59Z`),
+                type: "weekend",
+                reason: "Weekend",
+              },
+            },
+          });
+          created += 1;
+        }
+      }
+
+      if (created === 0) {
+        setAvailabilityError("No weekend days found within the provided range.");
+        return;
+      }
+      await refetchAvailability();
+      setAvailabilityMessage("Weekend availability recorded for tracked teammates.");
+    } catch (mutationError) {
+      const message =
+        mutationError instanceof Error ? mutationError.message : "Failed to generate weekend availability.";
+      setAvailabilityError(message);
+    } finally {
+      setWeekendSubmitting(false);
     }
   };
 
@@ -657,6 +1088,22 @@ export function AdminConsolePage() {
                             variant="outline"
                             size="sm"
                             onClick={() =>
+                              setProjectSummaryModal({
+                                projectId: project.id,
+                                projectKey: project.key,
+                                projectName: project.name,
+                                siteAlias: project.siteAlias,
+                                schedule: project.summarySchedule ?? null,
+                              })
+                            }
+                          >
+                            Automation
+                          </Button>
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
                               setProjectUsersModal({
                                 projectId: project.id,
                                 projectKey: project.key,
@@ -757,6 +1204,501 @@ export function AdminConsolePage() {
               </table>
             </div>
           )}
+        </section>
+
+        <section
+          id="availability"
+          className="rounded-3xl border border-slate-200 bg-white p-8 shadow-lg shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900 dark:shadow-slate-950/70"
+        >
+          <SectionHeader
+            title="Team availability"
+            description="Mark teammates as unavailable so stand-up metrics respect planned leave and holidays."
+          />
+          <div className="grid gap-6 lg:grid-cols-[minmax(0,1fr)_minmax(0,1.35fr)]">
+            <form
+              onSubmit={handleAvailabilitySubmit}
+              className="space-y-4 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60"
+            >
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Project
+                  </label>
+                  <select
+                    value={availabilityForm.projectId}
+                    onChange={(event) => {
+                      const projectId = event.target.value;
+                      const selected = projects.find((project) => project.id === projectId);
+                      setAvailabilityForm((prev) => ({
+                        ...prev,
+                        projectId,
+                        accountId: selected?.trackedUsers?.[0]?.jiraAccountId ?? "",
+                      }));
+                    }}
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                    required
+                  >
+                    <option value="" disabled>
+                      Select project
+                    </option>
+                    {projects.map((project) => (
+                      <option key={project.id} value={project.id}>
+                        {project.key} · {project.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Teammate
+                  </label>
+                  {availabilityAccounts.length ? (
+                    <select
+                      value={availabilityForm.accountId}
+                      onChange={(event) =>
+                        setAvailabilityForm((prev) => ({ ...prev, accountId: event.target.value }))
+                      }
+                      className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                      required
+                    >
+                      <option value="" disabled>
+                        Select teammate
+                      </option>
+                      {availabilityAccounts.map((entry) => (
+                        <option key={entry.accountId} value={entry.accountId}>
+                          {entry.label}
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <input
+                      type="text"
+                      value={availabilityForm.accountId}
+                      onChange={(event) =>
+                        setAvailabilityForm((prev) => ({ ...prev, accountId: event.target.value }))
+                      }
+                      className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                      placeholder="Enter Jira account ID"
+                      required
+                    />
+                  )}
+                  {!availabilityAccounts.length && availabilityProject ? (
+                    <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                      No tracked teammates found for this project. Enter a Jira account ID manually.
+                    </p>
+                  ) : null}
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Start date
+                  </label>
+                  <input
+                    type="date"
+                    value={availabilityForm.startDate}
+                    onChange={(event) =>
+                      setAvailabilityForm((prev) => ({ ...prev, startDate: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    End date
+                  </label>
+                  <input
+                    type="date"
+                    value={availabilityForm.endDate}
+                    onChange={(event) =>
+                      setAvailabilityForm((prev) => ({ ...prev, endDate: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Type
+                  </label>
+                  <select
+                    value={availabilityForm.type}
+                    onChange={(event) =>
+                      setAvailabilityForm((prev) => ({ ...prev, type: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                  >
+                    <option value="leave">Leave</option>
+                    <option value="holiday">Holiday</option>
+                    <option value="training">Training</option>
+                    <option value="OOO">OOO</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Reason (optional)
+                  </label>
+                  <input
+                    type="text"
+                    value={availabilityForm.reason}
+                    onChange={(event) =>
+                      setAvailabilityForm((prev) => ({ ...prev, reason: event.target.value }))
+                    }
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                    placeholder="Family vacation"
+                  />
+                </div>
+              </div>
+              <Button type="submit" disabled={creatingAvailability || !availabilityForm.projectId}>
+                {creatingAvailability ? "Saving…" : "Record availability"}
+              </Button>
+            </form>
+            <div className="space-y-4">
+              <form
+                onSubmit={(event) => {
+                  event.preventDefault();
+                  void refetchAvailability();
+                }}
+                className="flex flex-wrap items-end gap-3 rounded-2xl border border-slate-200 bg-white/80 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60"
+              >
+                <div className="flex min-w-[180px] flex-1 flex-col">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    Filter by account
+                  </label>
+                  <input
+                    type="text"
+                    value={availabilityAccountFilter}
+                    onChange={(event) => setAvailabilityAccountFilter(event.target.value)}
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                    placeholder="Optional"
+                  />
+                </div>
+                <div className="flex min-w-[140px] flex-1 flex-col">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    From
+                  </label>
+                  <input
+                    type="date"
+                    value={availabilityFrom}
+                    onChange={(event) => setAvailabilityFrom(event.target.value)}
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                  />
+                </div>
+                <div className="flex min-w-[140px] flex-1 flex-col">
+                  <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                    To
+                  </label>
+                  <input
+                    type="date"
+                    value={availabilityTo}
+                    onChange={(event) => setAvailabilityTo(event.target.value)}
+                    className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                  />
+                </div>
+                <div className="flex items-center gap-2">
+                  <Button type="submit" variant="outline">
+                    Apply
+                  </Button>
+                  <Button
+                    type="button"
+                    variant="ghost"
+                    onClick={() => {
+                      const today = new Date().toISOString().slice(0, 10);
+                      setAvailabilityAccountFilter("");
+                      setAvailabilityFrom(today);
+                      setAvailabilityTo("");
+                      void refetchAvailability({ accountId: undefined, from: today, to: undefined });
+                    }}
+                  >
+                    Reset
+                  </Button>
+                </div>
+              </form>
+              {availabilityError ? <InlineMessage tone="error">{availabilityError}</InlineMessage> : null}
+              {availabilityMessage ? <InlineMessage>{availabilityMessage}</InlineMessage> : null}
+              {weekendCount > 0 ? (
+                <div className="mb-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-slate-200 bg-slate-50/70 px-4 py-3 text-xs text-slate-500 dark:border-slate-800 dark:bg-slate-900/50 dark:text-slate-300">
+                  <div>
+                    {showWeekendEntries ? (
+                      <span>
+                        Showing {weekendCount} weekend auto-hold entries alongside manual
+                        updates.
+                      </span>
+                    ) : (
+                      <span>
+                        Weekend auto-holds hidden ({hiddenWeekendCount}). Show them to review or
+                        clean up.
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex gap-2">
+                    <Button
+                      type="button"
+                      variant="outline"
+                      size="sm"
+                      onClick={() => setShowWeekendEntries((value) => !value)}
+                    >
+                      {showWeekendEntries ? "Hide weekend holds" : "Show weekend holds"}
+                    </Button>
+                  </div>
+                </div>
+              ) : null}
+              {availabilityLoading ? (
+                <EmptyState message="Loading availability entries..." />
+              ) : filteredAvailabilityEntries.length === 0 ? (
+                <EmptyState
+                  message={
+                    hiddenWeekendCount && !showWeekendEntries
+                      ? "All entries in this range are weekend auto-holds. Show them to review or remove."
+                      : "No availability recorded for the selected window."
+                  }
+                />
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-900/40 dark:text-slate-400">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">Account</th>
+                        <th className="px-4 py-3 font-semibold">Project</th>
+                        <th className="px-4 py-3 font-semibold">Start</th>
+                        <th className="px-4 py-3 font-semibold">End</th>
+                        <th className="px-4 py-3 font-semibold">Type</th>
+                        <th className="px-4 py-3 font-semibold">Reason</th>
+                        <th className="px-4 py-3 font-semibold text-right">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
+                      {filteredAvailabilityEntries.map((entry) => {
+                        const typeLabelRaw = entry.type?.replace(/_/g, " ") ?? "leave";
+                        const typeLabel =
+                          typeLabelRaw.charAt(0).toUpperCase() + typeLabelRaw.slice(1);
+                        return (
+                        <tr
+                          key={entry.id}
+                          className={clsx(
+                            "hover:bg-slate-50/60 dark:hover:bg-slate-800/60",
+                            entry.type === "weekend"
+                              ? "bg-slate-50/40 text-slate-500 dark:bg-slate-900/30"
+                              : "",
+                          )}
+                        >
+                          <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">
+                            {entry.jiraAccountId}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                            {entry.project
+                              ? `${entry.project.key} · ${entry.project.name}`
+                              : entry.projectId ?? "—"}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                            {formatDate(entry.startDate)}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                            {formatDate(entry.endDate)}
+                          </td>
+                          <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                            {typeLabel}
+                          </td>
+                          <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
+                            {entry.reason ?? "—"}
+                          </td>
+                          <td className="px-4 py-3 text-right">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              disabled={availabilityDeletingId === entry.id}
+                              onClick={() => {
+                                void handleAvailabilityDelete(entry.id);
+                              }}
+                            >
+                              {availabilityDeletingId === entry.id ? "Removing…" : "Remove"}
+                            </Button>
+                          </td>
+                        </tr>
+                      )})}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-white/70 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/40">
+                <div className="flex flex-col gap-1">
+                  <h3 className="text-sm font-semibold text-slate-900 dark:text-slate-100">Weekend provisioning</h3>
+                  <p className="text-xs text-slate-500 dark:text-slate-400">
+                    Quickly mark routine weekend days as out-of-office for every tracked teammate on a project.
+                  </p>
+                </div>
+                <form onSubmit={handleWeekendProvision} className="mt-3 space-y-3">
+                  <div className="grid grid-cols-1 gap-3 sm:grid-cols-2">
+                    <div>
+                      <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                        Project
+                      </label>
+                      <select
+                        value={weekendForm.projectId}
+                        onChange={(event) =>
+                          setWeekendForm((prev) => ({ ...prev, projectId: event.target.value }))
+                        }
+                        className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                        required
+                      >
+                        <option value="" disabled>
+                          Select project
+                        </option>
+                        {projects.map((project) => (
+                          <option key={project.id} value={project.id}>
+                            {project.key} · {project.name}
+                          </option>
+                        ))}
+                      </select>
+                      {weekendTrackedUsers.length ? (
+                        <p className="mt-1 text-[11px] text-slate-400 dark:text-slate-500">
+                          {weekendTrackedUsers.length} tracked teammate{weekendTrackedUsers.length === 1 ? "" : "s"} will be updated.
+                        </p>
+                      ) : weekendProject ? (
+                        <p className="mt-1 text-[11px] text-rose-500 dark:text-rose-300">
+                          No tracked teammates for this project.
+                        </p>
+                      ) : null}
+                    </div>
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          Range start
+                        </label>
+                        <input
+                          type="date"
+                          value={weekendForm.startDate}
+                          onChange={(event) => setWeekendForm((prev) => ({ ...prev, startDate: event.target.value }))}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                          required
+                        />
+                      </div>
+                      <div>
+                        <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                          Range end
+                        </label>
+                        <input
+                          type="date"
+                          value={weekendForm.endDate}
+                          onChange={(event) => setWeekendForm((prev) => ({ ...prev, endDate: event.target.value }))}
+                          className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                          placeholder="Optional"
+                        />
+                      </div>
+                    </div>
+                  </div>
+                  <div className="flex flex-wrap items-center gap-4">
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={weekendForm.saturday}
+                        onChange={(event) =>
+                          setWeekendForm((prev) => ({ ...prev, saturday: event.target.checked }))
+                        }
+                        className="h-4 w-4 rounded border border-slate-300 text-slate-600 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900"
+                      />
+                      Saturday
+                    </label>
+                    <label className="inline-flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      <input
+                        type="checkbox"
+                        checked={weekendForm.sunday}
+                        onChange={(event) =>
+                          setWeekendForm((prev) => ({ ...prev, sunday: event.target.checked }))
+                        }
+                        className="h-4 w-4 rounded border border-slate-300 text-slate-600 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900"
+                      />
+                      Sunday
+                    </label>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <Button type="submit" disabled={weekendSubmitting}>
+                      {weekendSubmitting ? "Generating…" : "Fill weekend slots"}
+                    </Button>
+                    <Button
+                      type="button"
+                      variant="ghost"
+                      onClick={() =>
+                        setWeekendForm({ projectId: "", startDate: "", endDate: "", saturday: true, sunday: true })
+                      }
+                    >
+                      Reset
+                    </Button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          </div>
+        </section>
+
+        <section
+          id="newsletter"
+          className="rounded-3xl border border-slate-200 bg-white p-8 shadow-lg shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900 dark:shadow-slate-950/70"
+        >
+          <SectionHeader
+            title="Daily newsletter"
+            description="Send the daily stand-up recap to platform managers without waiting for nightly jobs."
+          />
+          <div className="max-w-xl space-y-4 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60">
+            {newsletterError ? <InlineMessage tone="error">{newsletterError}</InlineMessage> : null}
+            {newsletterMessage ? <InlineMessage>{newsletterMessage}</InlineMessage> : null}
+            <form onSubmit={handleNewsletterSubmit} className="space-y-4">
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Delivery date
+                </label>
+                <input
+                  type="date"
+                  value={newsletterDate}
+                  onChange={(event) => setNewsletterDate(event.target.value)}
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                  required
+                />
+              </div>
+              <div>
+                <label className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                  Project (optional)
+                </label>
+                <select
+                  value={newsletterProjectId}
+                  onChange={(event) => setNewsletterProjectId(event.target.value)}
+                  className="mt-2 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                >
+                  <option value="">All projects</option>
+                  {projects.map((project) => (
+                    <option key={project.id} value={project.id}>
+                      {project.key} · {project.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className="flex items-center gap-2">
+                <Button type="submit" disabled={sendingNewsletter}>
+                  {sendingNewsletter ? "Sending…" : "Send newsletter"}
+                </Button>
+                <Button
+                  type="button"
+                  variant="ghost"
+                  onClick={() => {
+                    setNewsletterProjectId("");
+                    setNewsletterDate(new Date().toISOString().slice(0, 10));
+                    setNewsletterMessage(null);
+                    setNewsletterError(null);
+                  }}
+                >
+                  Reset
+                </Button>
+              </div>
+            </form>
+            <p className="text-xs leading-relaxed text-slate-500 dark:text-slate-400">
+              Managers with Jira++ access are included automatically. Content is sourced from the
+              latest hierarchical summaries captured for the chosen date.
+            </p>
+          </div>
         </section>
 
         <section
@@ -918,6 +1860,56 @@ export function AdminConsolePage() {
         onClose={() => setProjectSyncModal(null)}
         onSuccess={async () => {
           await refetch();
+        }}
+      />
+      <ProjectSummaryAutomationModal
+        project={projectSummaryModal}
+        saving={updatingSummarySchedule}
+        running={triggeringSummaryAutomation}
+        onClose={() => setProjectSummaryModal(null)}
+        onSave={async (input) => {
+          if (!projectSummaryModal) {
+            return;
+          }
+          const projectId = projectSummaryModal.projectId;
+          const result = await updateSummarySchedule({
+            variables: { projectId, input },
+          });
+          const updated = result.data?.updateProjectSummarySchedule ?? null;
+          setProjectSummaryModal((prev) =>
+            prev && prev.projectId === projectId ? { ...prev, schedule: updated } : prev,
+          );
+          const refreshed = await refetch();
+          const refreshedProject = (refreshed.data?.jiraSites ?? [])
+            .flatMap((site: any) => site.projects ?? [])
+            .find((entry: any) => entry.id === projectId);
+          setProjectSummaryModal((prev) =>
+            prev && prev.projectId === projectId
+              ? {
+                  ...prev,
+                  schedule: refreshedProject?.summarySchedule ?? prev.schedule,
+                }
+              : prev,
+          );
+        }}
+        onRun={async () => {
+          if (!projectSummaryModal) {
+            return;
+          }
+          const projectId = projectSummaryModal.projectId;
+          await triggerSummaryAutomation({ variables: { projectId } });
+          const refreshed = await refetch();
+          const refreshedProject = (refreshed.data?.jiraSites ?? [])
+            .flatMap((site: any) => site.projects ?? [])
+            .find((entry: any) => entry.id === projectId);
+          setProjectSummaryModal((prev) =>
+            prev && prev.projectId === projectId
+              ? {
+                  ...prev,
+                  schedule: refreshedProject?.summarySchedule ?? prev.schedule,
+                }
+              : prev,
+          );
         }}
       />
       {error ? (
@@ -2241,6 +3233,9 @@ function ProjectSyncModal({
   const [resumeSync, { loading: resumeLoading }] = useMutation(RESUME_SYNC_MUTATION);
   const [rescheduleSync, { loading: rescheduleLoading }] = useMutation(RESCHEDULE_SYNC_MUTATION);
   const [triggerSync, { loading: triggerLoading }] = useMutation(TRIGGER_SYNC_MUTATION);
+  const [backfillSummaries, { loading: backfillLoading }] = useMutation(BACKFILL_SUMMARIES_MUTATION);
+  const [backfillDays, setBackfillDays] = useState("15");
+  const [triggerDays, setTriggerDays] = useState("1");
 
   useEffect(() => {
     if (project) {
@@ -2296,7 +3291,16 @@ function ProjectSyncModal({
             variant="outline"
             size="sm"
             disabled={triggerLoading}
-            onClick={() => handleAction(() => triggerSync({ variables: { projectId: project.projectId } }))}
+            onClick={() =>
+              handleAction(() =>
+                triggerSync({
+                  variables: {
+                    projectId: project.projectId,
+                    days: triggerDays.trim() ? Number(triggerDays) : undefined,
+                  },
+                }),
+              )
+            }
           >
             {triggerLoading ? "Triggering…" : "Trigger incremental"}
           </Button>
@@ -2305,9 +3309,33 @@ function ProjectSyncModal({
             variant="outline"
             size="sm"
             disabled={triggerLoading}
-            onClick={() => handleAction(() => triggerSync({ variables: { projectId: project.projectId, full: true } }))}
+            onClick={() =>
+              handleAction(() =>
+                triggerSync({
+                  variables: { projectId: project.projectId, full: true, days: -1 },
+                }),
+              )
+            }
           >
             {triggerLoading ? "Triggering…" : "Trigger full resync"}
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={backfillLoading}
+            onClick={() =>
+              handleAction(() =>
+                backfillSummaries({
+                  variables: {
+                    projectId: project.projectId,
+                    days: Number(backfillDays) || undefined,
+                  },
+                }),
+              )
+            }
+          >
+            {backfillLoading ? "Backfilling…" : "Backfill summaries"}
           </Button>
           {isPaused ? (
             <Button
@@ -2332,6 +3360,18 @@ function ProjectSyncModal({
           )}
         </div>
 
+        <label className="space-y-1 text-xs font-medium uppercase tracking-wide text-slate-500 dark:text-slate-400">
+          Incremental window (days)
+          <input
+            type="number"
+            min="0"
+            value={triggerDays}
+            onChange={(event) => setTriggerDays(event.target.value)}
+            className="w-full rounded-lg border border-slate-200 bg-white px-2 py-1 text-sm font-normal lowercase text-slate-700 shadow-sm focus:border-slate-300 focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200 dark:focus:ring-slate-600"
+            placeholder="1"
+          />
+        </label>
+
         <form
           className="space-y-2"
           onSubmit={async (event) => {
@@ -2351,6 +3391,34 @@ function ProjectSyncModal({
           <div className="flex justify-end">
             <Button type="submit" size="sm" variant="outline" disabled={rescheduleLoading}>
               {rescheduleLoading ? "Updating…" : "Update"}
+            </Button>
+          </div>
+        </form>
+
+        <form
+          className="space-y-2"
+          onSubmit={async (event) => {
+            event.preventDefault();
+            await handleAction(() =>
+              backfillSummaries({
+                variables: {
+                  projectId: project.projectId,
+                  days: Number(backfillDays) || undefined,
+                },
+              }),
+            );
+          }}
+        >
+          <Input
+            label="Backfill days"
+            type="number"
+            value={backfillDays}
+            onChange={setBackfillDays}
+            placeholder="15"
+          />
+          <div className="flex justify-end">
+            <Button type="submit" size="sm" variant="outline" disabled={backfillLoading}>
+              {backfillLoading ? "Backfilling…" : "Run backfill"}
             </Button>
           </div>
         </form>
@@ -2420,6 +3488,172 @@ function ProjectSyncModal({
           </div>
         </div>
       </div>
+    </Modal>
+  );
+}
+
+function ProjectSummaryAutomationModal({
+  project,
+  onClose,
+  onSave,
+  onRun,
+  saving,
+  running,
+}: {
+  project: ProjectSummaryModalState | null;
+  onClose: () => void;
+  onSave: (input: { enabled: boolean; frequencyMinutes: number }) => Promise<void>;
+  onRun: () => Promise<void>;
+  saving: boolean;
+  running: boolean;
+}) {
+  const [enabled, setEnabled] = useState(true);
+  const [frequency, setFrequency] = useState("180");
+  const [message, setMessage] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (project) {
+      setEnabled(project.schedule?.enabled ?? true);
+      setFrequency(String(project.schedule?.frequencyMinutes ?? 180));
+      setMessage(null);
+      setError(null);
+    }
+  }, [project?.projectId, project?.schedule?.id]);
+
+  if (!project) {
+    return null;
+  }
+
+  const schedule = project.schedule;
+  const frequencyOptions = [60, 120, 180, 240, 360, 720];
+
+  const handleSubmit = async (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setError(null);
+    setMessage(null);
+    const parsed = Number.parseInt(frequency, 10);
+    const frequencyMinutes = Number.isFinite(parsed) ? parsed : 180;
+    try {
+      await onSave({ enabled, frequencyMinutes });
+      setMessage("Automation preferences saved.");
+    } catch (mutationError) {
+      const detail =
+        mutationError instanceof Error
+          ? mutationError.message
+          : "Failed to update automation.";
+      setError(detail);
+    }
+  };
+
+  const handleRun = async () => {
+    setError(null);
+    setMessage(null);
+    try {
+      await onRun();
+      setMessage("Summary snapshot regeneration requested.");
+    } catch (runError) {
+      const detail = runError instanceof Error ? runError.message : "Failed to trigger run.";
+      setError(detail);
+    }
+  };
+
+  return (
+    <Modal
+      open={Boolean(project)}
+      onClose={onClose}
+      title="Summary automation"
+      description={`Automated project snapshots for ${project.projectName} (${project.projectKey})`}
+    >
+      <form
+        onSubmit={handleSubmit}
+        className="space-y-4 text-sm text-slate-600 dark:text-slate-300"
+      >
+        {error ? <InlineMessage tone="error">{error}</InlineMessage> : null}
+        {message ? <InlineMessage>{message}</InlineMessage> : null}
+
+        <label className="flex items-center gap-3">
+          <input
+            type="checkbox"
+            className="h-4 w-4 rounded border border-slate-300 text-sky-600 focus:ring-sky-500 dark:border-slate-700 dark:bg-slate-900"
+            checked={enabled}
+            onChange={(event) => setEnabled(event.target.checked)}
+          />
+          <span className="font-medium text-slate-700 dark:text-slate-200">
+            Enable automatic summaries
+          </span>
+        </label>
+
+        <label className="block space-y-2">
+          <span className="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            Cadence
+          </span>
+          <select
+            value={frequency}
+            onChange={(event) => setFrequency(event.target.value)}
+            className="w-full rounded-xl border border-slate-300 bg-white px-3 py-2 text-sm shadow-sm focus:outline-none focus:ring-2 focus:ring-slate-400 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+            disabled={!enabled}
+          >
+            {frequencyOptions.map((minutes) => (
+              <option key={minutes} value={minutes.toString()}>
+                Every {minutes >= 60 ? `${minutes / 60} hour${minutes / 60 === 1 ? "" : "s"}` : `${minutes} minutes`}
+              </option>
+            ))}
+          </select>
+        </label>
+
+        <div className="grid gap-2 rounded-xl border border-slate-200 bg-slate-50/70 p-4 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-900/60 dark:text-slate-400">
+          <div className="flex items-center justify-between">
+            <span>Next run</span>
+            <span className="font-medium text-slate-600 dark:text-slate-200">
+              {formatDateTime(schedule?.nextRunAt)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Last run</span>
+            <span className="font-medium text-slate-600 dark:text-slate-200">
+              {formatDateTime(schedule?.lastRunAt)}
+            </span>
+          </div>
+          <div className="flex items-center justify-between">
+            <span>Status</span>
+            <span className="font-medium text-slate-600 dark:text-slate-200">
+              {enabled ? "Active" : "Paused"}
+            </span>
+          </div>
+          {schedule?.lastError ? (
+            <div className="rounded-lg border border-rose-200 bg-rose-50/70 p-3 text-rose-600 dark:border-rose-900/50 dark:bg-rose-950/30 dark:text-rose-200">
+              <p className="text-xs font-semibold uppercase tracking-wide">Last error</p>
+              <p className="mt-1 text-sm leading-relaxed">{schedule.lastError}</p>
+              <p className="mt-1 text-[11px] uppercase tracking-wide text-rose-500 dark:text-rose-300">
+                {formatDateTime(schedule.lastErrorAt)}
+              </p>
+            </div>
+          ) : null}
+        </div>
+
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={running || saving}
+            onClick={() => {
+              void handleRun();
+            }}
+          >
+            {running ? "Running…" : "Run now"}
+          </Button>
+          <div className="flex flex-wrap justify-end gap-2">
+            <Button type="button" variant="ghost" onClick={onClose}>
+              Close
+            </Button>
+            <Button type="submit" disabled={saving}>
+              {saving ? "Saving…" : "Save"}
+            </Button>
+          </div>
+        </div>
+      </form>
     </Modal>
   );
 }

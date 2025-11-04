@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
-import { DateTime } from "luxon";
-import { Agent, fetch } from "undici";
 import type { Prisma, PrismaClient } from "@platform/cdm";
+import { z } from "zod";
 import { getEnv } from "../../env.js";
+import { executeIssueInsightSkill } from "../../llm/runtime.js";
+import type { IssueInsightSkillInput } from "../../llm/types.js";
 
 
 type Provider = "auto" | "openai" | "local";
@@ -37,33 +38,52 @@ export interface IssueInsightDTO {
   computedAt: Date;
   expiresAt?: Date | null;
   providerMetadata?: Record<string, unknown> | null;
+  provider?: string;
+  stage?: StageProgressSnapshot | null;
+  delta?: InsightDeltaSummary | null;
+  requirement?: string | null;
+  waitingOn?: string[];
+  snapshotId?: string;
 }
+
+type SkillExecution = Awaited<ReturnType<typeof executeIssueInsightSkill>>;
+
+const InsightSkillResponseSchema = z.object({
+  summary: z.object({
+    text: z.string().min(1),
+    confidence: z.number().nullable().optional(),
+    provider: z.string().nullable().optional(),
+  }),
+  sentiment: z.object({
+    label: z.enum(["positive", "neutral", "negative"]),
+    score: z.number(),
+    tones: z.array(z.string()).optional(),
+    provider: z.string().nullable().optional(),
+  }),
+  signals: z
+    .array(
+      z.object({
+        type: z.string(),
+        severity: z.string(),
+        detail: z.string(),
+        metadata: z.record(z.any()).nullish(),
+      }),
+    )
+    .optional(),
+  escalationScore: z.number(),
+  expiresAt: z.string().nullable().optional(),
+  requirement: z.string().nullable().optional(),
+  waitingOn: z.array(z.string()).optional(),
+  metadata: z.record(z.any()).optional(),
+});
+
+type InsightSkillResponse = z.infer<typeof InsightSkillResponseSchema>;
 
 interface IssueContext {
   issue: IssueWithRelations;
   comments: IssueWithRelations["comments"];
   worklogs: IssueWithRelations["worklogs"];
 }
-
-interface AdapterOutput {
-  summary?: InsightSummary;
-  sentiment?: InsightSentiment;
-  metadata?: Record<string, unknown>;
-}
-
-const PROGRESS_STATUS_KEYWORDS = ["in progress", "in-review", "doing", "active"];
-const RESOLVED_STATUS_KEYWORDS = ["done", "resolved", "closed", "completed", "closed (done)"];
-const ESCALATION_KEYWORDS = [
-  "urgent",
-  "escalate",
-  "blocker",
-  "severity 1",
-  "sev 1",
-  "sev1",
-  "outage",
-  "sla",
-  "breach",
-];
 
 type IssueWithRelations = Prisma.IssueGetPayload<{
   include: {
@@ -74,12 +94,24 @@ type IssueWithRelations = Prisma.IssueGetPayload<{
     linksIn: { include: { source: true } };
     comments: { include: { author: { select: { displayName: true } } } };
     worklogs: { include: { author: { select: { displayName: true } } } };
+    children: {
+      select: {
+        id: true;
+        key: true;
+        summary: true;
+        status: true;
+        statusCategory: true;
+        assigneeId: true;
+        jiraUpdatedAt: true;
+      };
+    };
   };
 }>;
 
-type IssueInsightRecord = Prisma.IssueInsightGetPayload<{}>;
+type IssueInsightRecord = Prisma.IssueInsightGetPayload<Prisma.IssueInsightDefaultArgs>;
+type IssueInsightSnapshotRecord = Prisma.IssueInsightSnapshotGetPayload<Prisma.IssueInsightSnapshotDefaultArgs>;
 
-type IssueEntity = Prisma.IssueGetPayload<{}>;
+type IssueEntity = Prisma.IssueGetPayload<Prisma.IssueDefaultArgs>;
 
 const NEGATIVE_WORDS = [
   "angry",
@@ -109,11 +141,40 @@ const POSITIVE_WORDS = [
   "thanks",
 ];
 
-const SEVERITY_WEIGHT: Record<Severity, number> = {
-  low: 0.2,
-  medium: 0.5,
-  high: 0.8,
-};
+interface StageProgressSnapshot {
+  currentStage: string;
+  breakdown: Array<{
+    key: string;
+    label: string;
+    total: number;
+    inProgress: number;
+    done: number;
+    todo: number;
+  }>;
+}
+
+interface InsightDeltaSummary {
+  newCommentCount: number;
+  latestCommentAuthors: string[];
+  newWorklogSeconds: number;
+  newWorklogHours: number;
+}
+
+interface ComputeInsightsArgs {
+  prisma: PrismaClient;
+  tenantId: string;
+  context: IssueContext;
+  hash: string;
+  previousSnapshot: IssueInsightSnapshotRecord | null;
+  previousSummary: InsightSummary | null;
+  newComments: IssueContext["comments"];
+  newWorklogs: IssueContext["worklogs"];
+  env: ReturnType<typeof getEnv>;
+  allowCache: boolean;
+  logger: Console;
+  userId?: string | null;
+  providerOverride?: string | null;
+}
 
 export async function getIssueInsights(
   prisma: PrismaClient,
@@ -129,7 +190,26 @@ export async function getIssueInsights(
 
   const existing = await prisma.issueInsight.findUnique({
     where: { issueId },
+    include: { latestSnapshot: true },
   });
+
+  const latestSnapshot =
+    existing?.latestSnapshot ??
+    (existing
+      ? await prisma.issueInsightSnapshot.findFirst({
+          where: { issueId, tenantId },
+          orderBy: { createdAt: "desc" },
+        })
+      : null);
+
+  if (
+    !refresh &&
+    latestSnapshot &&
+    latestSnapshot.inputsHash === hash &&
+    matchesProvider(latestSnapshot.summary, effectiveProvider)
+  ) {
+    return mapSnapshotRecord(latestSnapshot);
+  }
 
   if (
     !refresh &&
@@ -140,7 +220,36 @@ export async function getIssueInsights(
     return mapInsightRecord(existing);
   }
 
-  const result = await computeInsights(prisma, tenantId, context, hash, effectiveProvider);
+  const previousSummary =
+    latestSnapshot && typeof latestSnapshot.summary === "object" && !Array.isArray(latestSnapshot.summary)
+      ? sanitizeSummary(latestSnapshot.summary)
+      : null;
+  const previousCommentCursor = latestSnapshot?.commentCursor
+    ? new Date(latestSnapshot.commentCursor)
+    : null;
+  const previousWorklogCursor = latestSnapshot?.worklogCursor
+    ? new Date(latestSnapshot.worklogCursor)
+    : null;
+
+  const newComments = filterNewComments(context.comments, previousCommentCursor);
+  const newWorklogs = filterNewWorklogs(context.worklogs, previousWorklogCursor);
+
+  const result = await computeInsights({
+    prisma,
+    tenantId,
+    context,
+    hash,
+    previousSnapshot: latestSnapshot ?? null,
+    previousSummary,
+    newComments,
+    newWorklogs,
+    env,
+    allowCache: !refresh,
+    logger: console,
+    userId: null,
+    providerOverride: resolveProvider(provider, env.INSIGHTS_PROVIDER),
+  });
+
   return result;
 }
 
@@ -149,9 +258,10 @@ export async function ensureIssueInsights(
   tenantId: string,
   issueId: string,
   provider: Provider,
+  allowCache = true,
 ): Promise<void> {
   try {
-    await getIssueInsights(prisma, tenantId, issueId, provider, false);
+    await getIssueInsights(prisma, tenantId, issueId, provider, !allowCache);
   } catch (error) {
     console.error("[insights] ensureIssueInsights failed", { issueId, provider, error });
   }
@@ -212,6 +322,17 @@ async function loadIssueContext(
         orderBy: { jiraUpdatedAt: "desc" },
         take: 5,
       },
+      children: {
+        select: {
+          id: true,
+          key: true,
+          summary: true,
+          status: true,
+          statusCategory: true,
+          assigneeId: true,
+          jiraUpdatedAt: true,
+        },
+      },
     },
   })) as IssueWithRelations | null;
 
@@ -226,56 +347,500 @@ async function loadIssueContext(
   };
 }
 
-async function computeInsights(
-  prisma: PrismaClient,
-  tenantId: string,
-  context: IssueContext,
-  hash: string,
-  provider: Provider,
-): Promise<IssueInsightDTO> {
-  const env = getEnv();
+function filterNewComments(
+  comments: IssueContext["comments"],
+  cursor: Date | null,
+): IssueContext["comments"] {
+  if (!cursor) {
+    return comments;
+  }
+  const cutoff = cursor.getTime();
+  return comments.filter((comment) => comment.jiraCreatedAt.getTime() > cutoff);
+}
+
+function filterNewWorklogs(
+  worklogs: IssueContext["worklogs"],
+  cursor: Date | null,
+): IssueContext["worklogs"] {
+  if (!cursor) {
+    return worklogs;
+  }
+  const cutoff = cursor.getTime();
+  return worklogs.filter((worklog) => worklog.jiraUpdatedAt.getTime() > cutoff);
+}
+
+async function computeInsights({
+  prisma,
+  tenantId,
+  context,
+  hash,
+  previousSnapshot,
+  previousSummary,
+  newComments,
+  newWorklogs,
+  env,
+  allowCache,
+  logger,
+  userId,
+}: ComputeInsightsArgs): Promise<IssueInsightDTO> {
   const ttlMinutes = env.INSIGHTS_CACHE_TTL_MINUTES ?? 0;
-  const expiresAt =
-    ttlMinutes > 0 ? new Date(Date.now() + ttlMinutes * 60 * 1000) : null;
+  const expiresAt = ttlMinutes > 0 ? new Date(Date.now() + ttlMinutes * 60 * 1000) : null;
 
-  const ruleSummary = buildRuleBasedSummary(context);
+  const baselineSummary = buildRuleBasedSummary(context);
+  const incrementalSummary = buildIncrementalSummary(baselineSummary, previousSummary, newComments);
+  const summarySeed = incrementalSummary ?? baselineSummary;
   const heuristicSentiment = computeHeuristicSentiment(context);
+  const stageProgress = computeStageProgress(context.issue);
+  const deltaSummary = buildDeltaSummary(newComments, newWorklogs);
+  const waitingOn = deriveWaitingOn(context);
 
-  const adapterOutput = await runAdapter(provider, context, ruleSummary, heuristicSentiment);
+  let resolvedSummary: InsightSummary | null = null;
+  let resolvedSentiment: InsightSentiment | null = null;
+  let signals: InsightSignal[] = [];
+  let escalateScore = 0;
+  let resolvedExpiresAt = expiresAt ?? null;
+  let requirement = extractRequirement(context.issue);
+  let waitingList = waitingOn;
+  let providerMetadata: Record<string, unknown> = {};
+  let providerTag: string | null = null;
 
-  const summary = adapterOutput.summary ?? ruleSummary;
-  const sentiment = adapterOutput.sentiment ?? heuristicSentiment;
-  const signals = computeSignals(context, sentiment);
-  const escalateScore = computeEscalationScore(signals);
+  let skillExecution: SkillExecution | null = null;
+  let skillResponse: InsightSkillResponse | null = null;
 
-  const stored = await prisma.issueInsight.upsert({
+  try {
+    const skillInput = buildIssueInsightSkillInput({
+      issue: context.issue,
+      summarySeed,
+      incrementalSummary,
+      heuristicSentiment,
+      stageProgress,
+      delta: deltaSummary,
+      waitingOn,
+      comments: context.comments,
+      worklogs: context.worklogs,
+    });
+
+    skillExecution = await executeIssueInsightSkill({
+      tenantId,
+      userId,
+      requestId: hash,
+      payload: skillInput,
+      allowCache,
+    });
+
+    skillResponse = parseInsightSkillOutput(skillExecution.output);
+  } catch (error) {
+    logger.error("[insights] deterministic skill execution failed", error);
+    throw error instanceof Error ? error : new Error("Deterministic skill execution failed");
+  }
+
+  if (!skillResponse || !skillExecution) {
+    throw new Error("Skill execution did not return a valid response");
+  }
+
+  const rawConfidence = skillResponse.summary.confidence;
+  const confidence =
+    typeof rawConfidence === "number"
+      ? Math.min(1, Math.max(0, rawConfidence))
+      : undefined;
+
+  providerTag = skillResponse.summary.provider ?? skillExecution.model.provider ?? "llm";
+  const providerValue = providerTag ?? "llm";
+  resolvedSummary = {
+    text: skillResponse.summary.text,
+    provider: providerValue,
+    confidence,
+  };
+  resolvedSentiment = {
+    label: skillResponse.sentiment.label,
+    score: Number(skillResponse.sentiment.score.toFixed(2)),
+    tones: skillResponse.sentiment.tones ?? [],
+    provider: skillResponse.sentiment.provider ?? providerValue,
+  };
+  signals = (skillResponse.signals ?? []).map((signal) => ({
+    type: signal.type,
+    severity: (signal.severity ?? "medium").toLowerCase() as Severity,
+    detail: signal.detail,
+    metadata: signal.metadata ?? undefined,
+  }));
+  escalateScore = skillResponse.escalationScore;
+  resolvedExpiresAt = skillResponse.expiresAt ? new Date(skillResponse.expiresAt) : resolvedExpiresAt;
+  requirement = skillResponse.requirement ?? requirement;
+  waitingList = skillResponse.waitingOn && skillResponse.waitingOn.length ? skillResponse.waitingOn : waitingList;
+
+  providerMetadata = {
+    traceId: skillExecution.traceId,
+    cached: skillExecution.cached,
+    model: skillExecution.model,
+    usage: skillExecution.usage,
+    stage: stageProgress,
+    delta: deltaSummary,
+    requirement,
+    waitingOn: waitingList,
+    ruleSummary: summarySeed.text,
+    incrementalSummary: incrementalSummary?.text ?? null,
+  };
+  providerTag = providerValue;
+
+  const latestCommentCursor = determineLatestCommentCursor(context.comments, previousSnapshot?.commentCursor ?? null);
+  const latestWorklogCursor = determineLatestWorklogCursor(context.worklogs, previousSnapshot?.worklogCursor ?? null);
+
+  providerMetadata = {
+    ...providerMetadata,
+    ruleSummary: providerMetadata.ruleSummary ?? summarySeed.text,
+    incrementalSummary: providerMetadata.incrementalSummary ?? incrementalSummary?.text ?? null,
+  };
+
+  const snapshot = await prisma.issueInsightSnapshot.create({
+    data: {
+      tenantId,
+      issueId: context.issue.id,
+      provider: String(providerTag ?? "rule_based"),
+      inputsHash: hash,
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
+      escalationScore: escalateScore,
+      signals: signals as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
+      deltaSummary: deltaSummary as unknown as Prisma.InputJsonValue,
+      commentCursor: latestCommentCursor,
+      worklogCursor: latestWorklogCursor,
+      statusStage: stageProgress.currentStage,
+      stageBreakdown: stageProgress.breakdown as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  await prisma.issueInsight.upsert({
     where: { issueId: context.issue.id },
     create: {
       tenantId,
       issueId: context.issue.id,
-      summary: summary as unknown as Prisma.InputJsonValue,
-      sentiments: sentiment as unknown as Prisma.InputJsonValue,
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
       escalationScore: escalateScore,
       signals: signals as unknown as Prisma.InputJsonValue,
-      providerMetadata: (adapterOutput.metadata ?? {}) as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
       lastIssueHash: hash,
-      metadata: buildMetadata(context) as unknown as Prisma.InputJsonValue,
+      metadata: buildMetadata(context, stageProgress) as unknown as Prisma.InputJsonValue,
+      computedAt: snapshot.createdAt,
       expiresAt,
+      latestSnapshotId: snapshot.id,
     },
     update: {
-      summary: summary as unknown as Prisma.InputJsonValue,
-      sentiments: sentiment as unknown as Prisma.InputJsonValue,
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
       escalationScore: escalateScore,
       signals: signals as unknown as Prisma.InputJsonValue,
-      providerMetadata: (adapterOutput.metadata ?? {}) as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
       lastIssueHash: hash,
-      metadata: buildMetadata(context) as unknown as Prisma.InputJsonValue,
-      computedAt: new Date(),
-      expiresAt,
+      metadata: buildMetadata(context, stageProgress) as unknown as Prisma.InputJsonValue,
+      computedAt: snapshot.createdAt,
+      expiresAt: resolvedExpiresAt,
+      latestSnapshotId: snapshot.id,
     },
   });
 
-  return mapInsightRecord(stored);
+  return mapSnapshotRecord(snapshot);
+}
+
+function determineLatestCommentCursor(
+  comments: IssueContext["comments"],
+  fallback: string | null,
+): string | null {
+  if (!comments.length) {
+    return fallback;
+  }
+  const latest = comments.reduce((acc, comment) => {
+    if (!acc) {
+      return comment.jiraCreatedAt;
+    }
+    return comment.jiraCreatedAt.getTime() > acc.getTime() ? comment.jiraCreatedAt : acc;
+  }, comments[0].jiraCreatedAt);
+  return latest ? latest.toISOString() : fallback;
+}
+
+function determineLatestWorklogCursor(
+  worklogs: IssueContext["worklogs"],
+  fallback: string | null,
+): string | null {
+  if (!worklogs.length) {
+    return fallback;
+  }
+  const latest = worklogs.reduce((acc, worklog) => {
+    if (!acc) {
+      return worklog.jiraUpdatedAt;
+    }
+    return worklog.jiraUpdatedAt.getTime() > acc.getTime() ? worklog.jiraUpdatedAt : acc;
+  }, worklogs[0].jiraUpdatedAt);
+  return latest ? latest.toISOString() : fallback;
+}
+
+function buildDeltaSummary(
+  newComments: IssueContext["comments"],
+  newWorklogs: IssueContext["worklogs"],
+): InsightDeltaSummary {
+  const newWorklogSeconds = newWorklogs.reduce((total, worklog) => total + (worklog.timeSpent ?? 0), 0);
+  const authors = Array.from(
+    new Set(
+      newComments.map((comment) => comment.author?.displayName ?? "User"),
+    ),
+  ).slice(0, 5);
+
+  return {
+    newCommentCount: newComments.length,
+    latestCommentAuthors: authors,
+    newWorklogSeconds,
+    newWorklogHours: Number((newWorklogSeconds / 3600).toFixed(2)),
+  };
+}
+
+interface BuildIssueInsightSkillInputArgs {
+  issue: IssueWithRelations;
+  summarySeed: InsightSummary;
+  incrementalSummary: InsightSummary | null;
+  heuristicSentiment: InsightSentiment;
+  stageProgress: StageProgressSnapshot;
+  delta: InsightDeltaSummary;
+  waitingOn: string[];
+  comments: IssueContext["comments"];
+  worklogs: IssueContext["worklogs"];
+}
+
+function buildIssueInsightSkillInput(args: BuildIssueInsightSkillInputArgs): IssueInsightSkillInput {
+  const dueDate = args.issue.dueDate ? new Date(args.issue.dueDate).toISOString() : "Not set";
+  const resolvedAt = args.issue.resolvedAt ? new Date(args.issue.resolvedAt).toISOString() : "Not resolved";
+  const tones = args.heuristicSentiment.tones.length ? args.heuristicSentiment.tones.join(", ") : "none";
+
+  return {
+    issueKey: args.issue.key,
+    issueSummary: args.issue.summary ?? "No summary provided",
+    issueStatus: args.issue.status ?? "Unspecified",
+    statusCategory: args.issue.statusCategory ?? "Unknown",
+    priority: args.issue.priority ?? "Unspecified",
+    dueDate,
+    resolvedAt,
+    ruleSummary: args.summarySeed.text,
+    incrementalSummary: args.incrementalSummary?.text ?? "No incremental context detected.",
+    heuristicSentimentLabel: args.heuristicSentiment.label,
+    heuristicSentimentScore: args.heuristicSentiment.score.toFixed(2),
+    heuristicSentimentTones: tones,
+    stageSummary: formatStageSummary(args.stageProgress),
+    recentComments: formatRecentComments(args.comments),
+    recentWorklogs: formatRecentWorklogs(args.worklogs),
+    waitingOn: formatWaitingOnSummary(args.waitingOn),
+    additionalNotes: buildAdditionalNotes(args.delta, args.waitingOn),
+  };
+}
+
+function parseInsightSkillOutput(raw: string): InsightSkillResponse {
+  const trimmed = raw.trim();
+  const normalized = extractJsonPayload(trimmed);
+  const parsed = InsightSkillResponseSchema.parse(JSON.parse(normalized));
+  return parsed;
+}
+
+function extractJsonPayload(raw: string): string {
+  const fenced = raw.match(/^```(?:json)?\s*\n([\s\S]*?)```$/i);
+  if (fenced && fenced[1]) {
+    return fenced[1].trim();
+  }
+  return raw;
+}
+
+function formatStageSummary(stage: StageProgressSnapshot): string {
+  if (!stage.breakdown.length) {
+    return "No sub-task breakdown available.";
+  }
+  return stage.breakdown
+    .map(
+      (bucket) =>
+        `${bucket.label}: total ${bucket.total}, in progress ${bucket.inProgress}, done ${bucket.done}, todo ${bucket.todo}`,
+    )
+    .join(" | ");
+}
+
+function formatRecentComments(comments: IssueContext["comments"]): string {
+  if (!comments.length) {
+    return "No recent comments.";
+  }
+  return comments
+    .map((comment) => {
+      const author = comment.author?.displayName ?? "Unknown";
+      const timestamp = comment.jiraCreatedAt.toISOString();
+      const body = truncate((comment.body ?? "").replace(/\s+/g, " ").trim(), 200);
+      return `${timestamp} — ${author}: ${body}`;
+    })
+    .join("\n");
+}
+
+function formatRecentWorklogs(worklogs: IssueContext["worklogs"]): string {
+  if (!worklogs.length) {
+    return "No recent worklogs.";
+  }
+  return worklogs
+    .map((log) => {
+      const author = log.author?.displayName ?? "Unknown";
+      const timestamp = log.jiraUpdatedAt.toISOString();
+      const hours = formatHours(log.timeSpent ?? 0);
+      const description = truncate((log.description ?? "").replace(/\s+/g, " ").trim(), 160);
+      return `${timestamp} — ${author}: ${hours} · ${description || "No description provided."}`;
+    })
+    .join("\n");
+}
+
+function formatWaitingOnSummary(waitingOn: string[]): string {
+  if (!waitingOn.length) {
+    return "None";
+  }
+  return waitingOn.join("; ");
+}
+
+function buildAdditionalNotes(delta: InsightDeltaSummary, waitingOn: string[]): string {
+  return `New comments: ${delta.newCommentCount}. Worklog hours added: ${delta.newWorklogHours.toFixed(
+    2,
+  )}. Pending dependencies: ${waitingOn.length}.`;
+}
+
+function formatHours(seconds: number): string {
+  const hours = seconds / 3600;
+  return `${hours.toFixed(2)}h`;
+}
+
+const STAGE_PIPELINE: Array<{
+  key: string;
+  label: string;
+  keywords: string[];
+}> = [
+  { key: "REQUIREMENT", label: "Requirement", keywords: ["todo", "backlog", "plan", "analysis", "refine"] },
+  { key: "DEVELOPMENT", label: "Development", keywords: ["progress", "dev", "implement", "coding", "build"] },
+  { key: "QA", label: "QA", keywords: ["test", "qa", "review", "verify"] },
+  { key: "DEPLOYMENT", label: "Deployment", keywords: ["deploy", "release", "done", "closed", "complete"] },
+];
+
+function computeStageProgress(issue: IssueWithRelations): StageProgressSnapshot {
+  const breakdown = STAGE_PIPELINE.map((stage) => ({
+    key: stage.key,
+    label: stage.label,
+    total: 0,
+    inProgress: 0,
+    done: 0,
+    todo: 0,
+  }));
+
+  const classify = (status?: string | null, statusCategory?: string | null): string => {
+    const value = (status ?? "").toLowerCase();
+    for (const stage of STAGE_PIPELINE) {
+      if (stage.key === "DEPLOYMENT" && (statusCategory ?? "").toLowerCase() === "done") {
+        return stage.key;
+      }
+      if (stage.keywords.some((keyword) => value.includes(keyword))) {
+        return stage.key;
+      }
+    }
+    return STAGE_PIPELINE[0].key;
+  };
+
+  const increment = (stageKey: string, status?: string | null, statusCategory?: string | null) => {
+    const bucket = breakdown.find((entry) => entry.key === stageKey);
+    if (!bucket) {
+      return;
+    }
+    bucket.total += 1;
+    const normalisedCategory = (statusCategory ?? "").toLowerCase();
+    const normalisedStatus = (status ?? "").toLowerCase();
+    if (
+      normalisedCategory === "done" ||
+      normalisedStatus.includes("done") ||
+      normalisedStatus.includes("closed") ||
+      normalisedStatus.includes("resolved")
+    ) {
+      bucket.done += 1;
+    } else if (
+      normalisedCategory === "in progress" ||
+      normalisedStatus.includes("progress") ||
+      normalisedStatus.includes("review") ||
+      normalisedStatus.includes("test") ||
+      normalisedStatus.includes("qa")
+    ) {
+      bucket.inProgress += 1;
+    } else {
+      bucket.todo += 1;
+    }
+  };
+
+  if (issue.children?.length) {
+    for (const child of issue.children) {
+      increment(classify(child.status, child.statusCategory), child.status, child.statusCategory);
+    }
+  } else {
+    increment(classify(issue.status, issue.statusCategory), issue.status, issue.statusCategory);
+  }
+
+  const currentCandidate = [...breakdown]
+    .reverse()
+    .find((bucket) => bucket.inProgress > 0 || bucket.done > 0) ?? breakdown.find((bucket) => bucket.total > 0);
+
+  const derivedStage = currentCandidate?.key ?? classify(issue.status, issue.statusCategory);
+
+  return {
+    currentStage: derivedStage,
+    breakdown,
+  };
+}
+
+function extractRequirement(issue: IssueWithRelations): string | null {
+  const remote = issue.remoteData as Record<string, unknown> | null | undefined;
+  if (!remote || typeof remote !== "object") {
+    return null;
+  }
+  const description = remote.description ?? remote.summary ?? null;
+  if (typeof description === "string" && description.trim().length > 0) {
+    return truncate(description.trim(), 800);
+  }
+  return null;
+}
+
+function deriveWaitingOn(context: IssueContext): string[] {
+  return context.issue.linksOut
+    .filter((link) => (link.linkType ?? "").toLowerCase().includes("block") && !isResolved(link.target))
+    .map((link) => {
+      const key = link.target?.key ?? link.target?.id ?? "unknown";
+      const status = link.target?.status ?? "";
+      return status ? `${key} (${status})` : key;
+    });
+}
+
+function buildIncrementalSummary(
+  baseline: InsightSummary,
+  previousSummary: InsightSummary | null,
+  newComments: IssueContext["comments"],
+): InsightSummary | null {
+  if (!previousSummary) {
+    return null;
+  }
+  if (!newComments.length) {
+    return null;
+  }
+
+  const updates = newComments
+    .slice(0, 3)
+    .map((comment) => {
+      const author = comment.author?.displayName ?? "User";
+      const body = truncate(comment.body.replace(/\s+/g, " ").trim(), 140);
+      return `${author}: ${body}`;
+    })
+    .join(" ");
+
+  const merged = truncate(
+    `${previousSummary.text}\nUpdates: ${updates}`,
+    1200,
+  );
+
+  return {
+    text: merged,
+    provider: "incremental_rule",
+    confidence: Math.min(0.9, (previousSummary.confidence ?? baseline.confidence ?? 0.6) + 0.05),
+  };
 }
 
 function buildRuleBasedSummary(context: IssueContext): InsightSummary {
@@ -283,6 +848,11 @@ function buildRuleBasedSummary(context: IssueContext): InsightSummary {
   const issue = context.issue;
   if (issue.summary) {
     fragments.push(issue.summary.trim());
+  }
+
+  const requirement = extractRequirement(issue);
+  if (requirement) {
+    fragments.push(`Requirement: ${truncate(requirement, 240)}`);
   }
 
   const latestComments = [...context.comments]
@@ -347,360 +917,15 @@ function computeHeuristicSentiment(context: IssueContext): InsightSentiment {
   };
 }
 
-async function runAdapter(
-  provider: Provider,
-  context: IssueContext,
-  ruleSummary: InsightSummary,
-  heuristicSentiment: InsightSentiment,
-): Promise<AdapterOutput> {
-  const env = getEnv();
-  const effective = provider === "auto" ? resolveProviderFromEnv(env) : provider;
-  if (effective === "openai") {
-    const output = await callOpenAI(context, ruleSummary, heuristicSentiment);
-    if (output) {
-      return output;
-    }
-  }
-  if (effective === "local") {
-    const output = await callLocalModel(context, ruleSummary, heuristicSentiment);
-    if (output) {
-      return output;
-    }
-  }
-  return { summary: ruleSummary, sentiment: heuristicSentiment };
-}
-
-function resolveProviderFromEnv(env: ReturnType<typeof getEnv>): Provider {
-  if (env.INSIGHTS_PROVIDER === "openai" && env.OPENAI_API_KEY) {
-    return "openai";
-  }
-  if (env.INSIGHTS_PROVIDER === "local") {
-    return "local";
-  }
-  if (env.OPENAI_API_KEY) {
-    return "openai";
-  }
-  return "local";
-}
-
-async function callOpenAI(
-  context: IssueContext,
-  ruleSummary: InsightSummary,
-  heuristicSentiment: InsightSentiment,
-): Promise<AdapterOutput | null> {
-  const env = getEnv();
-  if (!env.OPENAI_API_KEY) {
-    return null;
-  }
-
-  try {
-    const response = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${env.OPENAI_API_KEY}`,
-      },
-      body: JSON.stringify({
-        model: env.OPENAI_MODEL,
-        temperature: 0.2,
-        response_format: { type: "json_object" },
-        messages: [
-          {
-            role: "system",
-            content:
-              "You summarise Jira tickets and assess sentiment. Return JSON with keys summary.text, summary.confidence, sentiment.label, sentiment.score, sentiment.tones[].",
-          },
-          {
-            role: "user",
-            content: buildPrompt(context, ruleSummary, heuristicSentiment),
-          },
-        ],
-      }),
-    });
-
-    if (!response.ok) {
-      throw new Error(`OpenAI HTTP ${response.status}`);
-    }
-
-    const json = (await response.json()) as any;
-    const content = json?.choices?.[0]?.message?.content;
-    if (typeof content !== "string") {
-      return null;
-    }
-    const payload = JSON.parse(content);
-    const summary: InsightSummary = {
-      text: payload?.summary?.text ?? ruleSummary.text,
-      confidence: payload?.summary?.confidence ?? 0.7,
-      provider: "openai",
-    };
-    const sentiment: InsightSentiment = {
-      label: payload?.sentiment?.label ?? heuristicSentiment.label,
-      score:
-        typeof payload?.sentiment?.score === "number"
-          ? Number(payload.sentiment.score.toFixed(2))
-          : heuristicSentiment.score,
-      tones: Array.isArray(payload?.sentiment?.tones)
-        ? payload.sentiment.tones.filter((item: unknown) => typeof item === "string")
-        : heuristicSentiment.tones,
-      provider: "openai",
-    };
-
-    return {
-      summary,
-      sentiment,
-      metadata: {
-        openai: {
-          model: env.OPENAI_MODEL,
-        },
-      },
-    };
-  } catch (error) {
-    console.error("[insights] OpenAI adapter failed", error);
-    return null;
-  }
-}
-
-async function callLocalModel(
-  context: IssueContext,
-  ruleSummary: InsightSummary,
-  heuristicSentiment: InsightSentiment,
-): Promise<AdapterOutput | null> {
-  const env = getEnv();
-  if (!env.LOCAL_LLM_URL) {
-    return null;
-  }
-
-  const timeoutMs = env.INSIGHTS_LOCAL_TIMEOUT_MS ?? 120000;
-  const agent = new Agent({ headersTimeout: timeoutMs, bodyTimeout: timeoutMs });
-
-  try {
-    const response = await fetch(env.LOCAL_LLM_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        model: env.LOCAL_LLM_MODEL,
-        prompt: buildPrompt(context, ruleSummary, heuristicSentiment),
-        format: "json",
-        stream: false,
-      }),
-      dispatcher: agent,
-    });
-
-    if (!response.ok) {
-      throw new Error(`Local LLM HTTP ${response.status}`);
-    }
-
-    const payload = (await response.json()) as any;
-    const raw = typeof payload?.response === "string" ? payload.response.trim() : "";
-    const parsed = raw ? safeParseJson(raw) : null;
-
-    const summary: InsightSummary = {
-      text: parsed?.summary?.text ?? ruleSummary.text,
-      confidence: parsed?.summary?.confidence ?? 0.65,
-      provider: "local",
-    };
-    const sentiment: InsightSentiment = {
-      label: parsed?.sentiment?.label ?? heuristicSentiment.label,
-      score:
-        typeof parsed?.sentiment?.score === "number"
-          ? Number(parsed.sentiment.score.toFixed(2))
-          : heuristicSentiment.score,
-      tones: Array.isArray(parsed?.sentiment?.tones)
-        ? parsed.sentiment.tones.filter((item: unknown) => typeof item === "string")
-        : heuristicSentiment.tones,
-      provider: "local",
-    };
-
-    return {
-      summary,
-      sentiment,
-      metadata: {
-        local: {
-          endpoint: env.LOCAL_LLM_URL,
-          model: env.LOCAL_LLM_MODEL,
-        },
-      },
-    };
-  } catch (error) {
-    console.error("[insights] Local LLM adapter failed", error);
-    return null;
-  } finally {
-    await agent.close();
-  }
-}
-
-function buildPrompt(
-  context: IssueContext,
-  ruleSummary: InsightSummary,
-  heuristicSentiment: InsightSentiment,
-): string {
-  const issue = context.issue;
-  const recentComments = context.comments
-    .slice(0, 5)
-    .map(
-      (comment) =>
-        `- ${comment.author?.displayName ?? "User"} (${comment.jiraCreatedAt.toISOString()}): ${truncate(
-          comment.body.replace(/\s+/g, " ").trim(),
-          280,
-        )}`,
-    )
-    .join("\n");
-
-  return `
-Issue Key: ${issue.key}
-Summary: ${issue.summary ?? "N/A"}
-Status: ${issue.status}
-Priority: ${issue.priority ?? "N/A"}
-Due Date: ${issue.dueDate ? new Date(issue.dueDate).toISOString() : "N/A"}
-Resolved At: ${issue.resolvedAt ? new Date(issue.resolvedAt).toISOString() : "N/A"}
-Existing Summary: ${ruleSummary.text}
-Existing Sentiment Guess: ${heuristicSentiment.label} (${heuristicSentiment.score})
-
-Recent Comments:
-${recentComments}
-
-Return JSON with fields:
-{
-  "summary": { "text": string, "confidence": number },
-  "sentiment": { "label": "positive"|"neutral"|"negative", "score": number, "tones": string[] }
-}
-`.trim();
-}
-
-function computeSignals(
-  context: IssueContext,
-  sentiment: InsightSentiment,
-): InsightSignal[] {
-  const signals: InsightSignal[] = [];
-  const issue = context.issue;
-  const now = DateTime.utc();
-
-  if (sentiment.label === "negative" && sentiment.score <= -0.4) {
-    signals.push({
-      type: "negative_sentiment",
-      severity: sentiment.score <= -0.7 ? "high" : "medium",
-      detail: `Average score ${sentiment.score}`,
-    });
-  }
-
-  const keywordHits = countKeywords(context);
-  if (keywordHits >= 2) {
-    signals.push({
-      type: "escalation_keywords",
-      severity: "high",
-      detail: `Escalation keywords detected (${keywordHits})`,
-      metadata: { keywords: ESCALATION_KEYWORDS },
-    });
-  }
-
-  if (issue.dueDate && issue.statusCategory !== "Done") {
-    const due = DateTime.fromJSDate(new Date(issue.dueDate));
-    const hoursRemaining = due.diff(now, "hours").hours;
-    if (hoursRemaining <= 6) {
-      signals.push({
-        type: "sla_risk",
-        severity: hoursRemaining <= 2 ? "high" : "medium",
-        detail: `Due in ${hoursRemaining.toFixed(1)}h`,
-      });
-    }
-  }
-
-  const lastUpdatedDiff = now.diff(DateTime.fromJSDate(issue.jiraUpdatedAt), "days").days;
-  if (issue.statusCategory !== "Done" && lastUpdatedDiff >= 3) {
-    signals.push({
-      type: "stalled_progress",
-      severity: lastUpdatedDiff >= 7 ? "high" : "medium",
-      detail: `No updates for ${Math.floor(lastUpdatedDiff)} days`,
-    });
-  }
-
-  const reopenCount = countReopens(context);
-  if (reopenCount >= 2) {
-    signals.push({
-      type: "reopened_multiple",
-      severity: reopenCount >= 4 ? "high" : "medium",
-      detail: `Reopened ${reopenCount} times`,
-    });
-  }
-
-  const blockedLinks = context.issue.linksOut.filter((link) =>
-    (link.linkType ?? "").toLowerCase().includes("block"),
-  );
-  if (blockedLinks.some((link) => !isResolved(link.target))) {
-    signals.push({
-      type: "linked_blocker",
-      severity: "high",
-      detail: "Blocking unresolved issue",
-      metadata: {
-        blockedIssues: blockedLinks
-          .filter((link) => !isResolved(link.target))
-          .map((link) => link.target?.key ?? link.target?.id),
-      },
-    });
-  }
-
-  const unresolvedDependencies = context.issue.linksOut.filter(
-    (link) => !isResolved(link.target),
-  );
-  if (unresolvedDependencies.length >= 3) {
-    signals.push({
-      type: "dependency_cascade",
-      severity: "medium",
-      detail: `Has ${unresolvedDependencies.length} unresolved dependencies`,
-    });
-  }
-
-  if (issue.resolvedAt && issue.statusCategory !== "Done") {
-    signals.push({
-      type: "resolution_regression",
-      severity: "medium",
-      detail: "Resolved but re-opened",
-    });
-  }
-
-  const assigneeChangeCount = countAssigneeChanges(context);
-  if (assigneeChangeCount >= 3) {
-    signals.push({
-      type: "assignment_churn",
-      severity: "medium",
-      detail: `Assignee changed ${assigneeChangeCount} times`,
-    });
-  }
-
-  const ageDays = now.diff(DateTime.fromJSDate(issue.jiraCreatedAt), "days").days;
-  if (issue.statusCategory !== "Done" && ageDays >= 30) {
-    signals.push({
-      type: "long_running",
-      severity: ageDays >= 60 ? "high" : "medium",
-      detail: `Open for ${Math.floor(ageDays)} days`,
-    });
-  }
-
-  if (sentiment.label === "positive" && sentiment.score >= 0.6) {
-    signals.push({
-      type: "positive_feedback",
-      severity: "low",
-      detail: "Conversation trending positive",
-    });
-  }
-
-  return signals;
-}
-
-function computeEscalationScore(signals: InsightSignal[]): number {
-  if (!signals.length) {
-    return 0.1;
-  }
-  const raw = signals.reduce((acc, signal) => acc + SEVERITY_WEIGHT[signal.severity], 0);
-  return Math.min(1, Number(raw.toFixed(2)));
-}
-
-function buildMetadata(context: IssueContext): Record<string, unknown> {
+function buildMetadata(context: IssueContext, stage: StageProgressSnapshot): Record<string, unknown> {
   return {
     projectKey: context.issue.project.key,
     priority: context.issue.priority,
     status: context.issue.status,
     sentimentTokens: context.comments.length,
+    stage: stage.currentStage,
+    stageBreakdown: stage.breakdown,
+    requirement: extractRequirement(context.issue),
   };
 }
 
@@ -740,75 +965,6 @@ function computeIssueHash(context: IssueContext): string {
   return createHash("sha256").update(JSON.stringify(data)).digest("hex");
 }
 
-function countKeywords(context: IssueContext): number {
-  const text = [
-    context.issue.summary ?? "",
-    ...context.comments.map((c) => c.body ?? ""),
-  ].join(" ");
-  const lower = text.toLowerCase();
-  return ESCALATION_KEYWORDS.reduce(
-    (acc, keyword) => (lower.includes(keyword) ? acc + 1 : acc),
-    0,
-  );
-}
-
-function countReopens(context: IssueContext): number {
-  const remote = context.issue.remoteData as Prisma.JsonObject | null | undefined;
-  const histories = (remote?.changelog as Prisma.JsonObject | undefined)?.histories;
-  if (!Array.isArray(histories)) {
-    return 0;
-  }
-  let count = 0;
-  for (const entry of histories) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const items = (entry as Record<string, unknown>).items;
-    if (!Array.isArray(items)) {
-      continue;
-    }
-    for (const item of items) {
-      const obj = item as Record<string, unknown>;
-      const field = typeof obj.field === "string" ? (obj.field as string).toLowerCase() : null;
-      const toStatus = typeof obj["toString"] === "string" ? (obj["toString"] as string).toLowerCase() : "";
-      if (field === "status" && toStatus.includes("reopen")) {
-        count += 1;
-      }
-    }
-  }
-  return count;
-}
-
-function countAssigneeChanges(context: IssueContext): number {
-  const remote = context.issue.remoteData as Prisma.JsonObject | null | undefined;
-  const histories = (remote?.changelog as Prisma.JsonObject | undefined)?.histories;
-  if (!Array.isArray(histories)) {
-    return 0;
-  }
-  let count = 0;
-  for (const entry of histories) {
-    if (!entry || typeof entry !== "object") {
-      continue;
-    }
-    const items = (entry as Record<string, unknown>).items;
-    if (!Array.isArray(items)) {
-      continue;
-    }
-    if (
-      items.some((item) => {
-        if (!item || typeof item !== "object") {
-          return false;
-        }
-        const field = (item as Record<string, unknown>).field;
-        return typeof field === "string" && field.toLowerCase() === "assignee";
-      })
-    ) {
-      count += 1;
-    }
-  }
-  return count;
-}
-
 function isResolved(issue: IssueEntity | null | undefined): boolean {
   if (!issue) return false;
   if (issue.statusCategory) {
@@ -823,25 +979,148 @@ function truncate(text: string, length: number): string {
 }
 
 
-function safeParseJson(content: string): any | null {
-  try {
-    return JSON.parse(content);
-  } catch {
-    return null;
-  }
+export function mapSnapshotRecord(record: IssueInsightSnapshotRecord): IssueInsightDTO {
+  const summary = sanitizeSummary(record.summary ?? null);
+  const sentiment = sanitizeSentiment(record.sentiments ?? null);
+  const metadata = (record.providerMetadata as Record<string, unknown> | null) ?? {};
+  const stage = deserializeStageSnapshot(record.statusStage ?? null, record.stageBreakdown) ?? normalizeStageSnapshot(metadata.stage);
+  const delta = normalizeDeltaSummary(record.deltaSummary) ?? normalizeDeltaSummary(metadata.delta);
+  const requirement = typeof metadata.requirement === "string" ? metadata.requirement : null;
+  const waitingOn = normalizeStringArray(metadata.waitingOn) ?? [];
+
+  return {
+    issueId: record.issueId,
+    summary,
+    sentiment,
+    escalateScore: record.escalationScore ?? 0,
+    signals: sanitizeSignals(record.signals ?? null),
+    computedAt: record.createdAt,
+    expiresAt: null,
+    providerMetadata: metadata,
+    provider: record.provider ?? summary.provider,
+    stage,
+    delta,
+    requirement,
+    waitingOn,
+    snapshotId: record.id,
+  };
 }
 
 export function mapInsightRecord(record: IssueInsightRecord): IssueInsightDTO {
+  const metadata = (record.providerMetadata as Record<string, unknown> | null) ?? {};
+  const summary = sanitizeSummary(record.summary);
+  const sentiment = sanitizeSentiment(record.sentiments);
+  const stage = normalizeStageSnapshot(metadata.stage);
+  const delta = normalizeDeltaSummary(metadata.delta);
+  const requirement = typeof metadata.requirement === "string" ? metadata.requirement : null;
+  const waitingOn = normalizeStringArray(metadata.waitingOn) ?? [];
+  const provider = (typeof metadata.provider === "string" && metadata.provider) || summary.provider;
+
   return {
     issueId: record.issueId,
-    summary: sanitizeSummary(record.summary),
-    sentiment: sanitizeSentiment(record.sentiments),
+    summary,
+    sentiment,
     escalateScore: record.escalationScore ?? 0,
     signals: sanitizeSignals(record.signals),
     computedAt: record.computedAt,
     expiresAt: record.expiresAt,
-    providerMetadata: (record.providerMetadata as Record<string, unknown>) ?? {},
+    providerMetadata: metadata,
+    provider,
+    stage,
+    delta,
+    requirement,
+    waitingOn,
   };
+}
+
+function deserializeStageSnapshot(
+  statusStage: string | null | undefined,
+  value: Prisma.JsonValue | null,
+): StageProgressSnapshot | null {
+  if (!statusStage) {
+    return null;
+  }
+  if (!Array.isArray(value)) {
+    return { currentStage: statusStage, breakdown: [] };
+  }
+  const breakdown = value
+    .map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return null;
+      }
+      const obj = entry as Record<string, unknown>;
+      return {
+        key: String(obj.key ?? obj.label ?? ""),
+        label: typeof obj.label === "string" ? obj.label : String(obj.key ?? obj.stage ?? ""),
+        total: Number(obj.total ?? 0),
+        inProgress: Number(obj.inProgress ?? 0),
+        done: Number(obj.done ?? 0),
+        todo: Number(obj.todo ?? 0),
+      };
+    })
+    .filter((bucket): bucket is StageProgressSnapshot["breakdown"][number] => bucket !== null);
+  return {
+    currentStage: statusStage,
+    breakdown,
+  };
+}
+
+function normalizeStageSnapshot(value: unknown): StageProgressSnapshot | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  const currentStage = typeof obj.current === "string"
+    ? obj.current
+    : typeof obj.currentStage === "string"
+      ? obj.currentStage
+      : null;
+  if (!currentStage) {
+    return null;
+  }
+  const breakdownRaw = Array.isArray(obj.breakdown) ? obj.breakdown : [];
+  const breakdown = breakdownRaw
+    .map((entry) => {
+      if (!entry || typeof entry !== "object" || Array.isArray(entry)) {
+        return null;
+      }
+      const bucket = entry as Record<string, unknown>;
+      return {
+        key: String(bucket.key ?? bucket.label ?? ""),
+        label: typeof bucket.label === "string" ? bucket.label : String(bucket.key ?? ""),
+        total: Number(bucket.total ?? 0),
+        inProgress: Number(bucket.inProgress ?? 0),
+        done: Number(bucket.done ?? 0),
+        todo: Number(bucket.todo ?? 0),
+      };
+    })
+    .filter((bucket): bucket is StageProgressSnapshot["breakdown"][number] => bucket !== null);
+  return { currentStage, breakdown };
+}
+
+function normalizeDeltaSummary(value: unknown): InsightDeltaSummary | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return null;
+  }
+  const obj = value as Record<string, unknown>;
+  const newCommentCount = Number(obj.newCommentCount ?? obj.commentCount ?? 0);
+  const authors = normalizeStringArray(obj.latestCommentAuthors) ?? [];
+  const seconds = Number(obj.newWorklogSeconds ?? obj.worklogSeconds ?? 0);
+  const hours = obj.newWorklogHours !== undefined ? Number(obj.newWorklogHours) : Number((seconds / 3600).toFixed(2));
+  return {
+    newCommentCount,
+    latestCommentAuthors: authors,
+    newWorklogSeconds: seconds,
+    newWorklogHours: hours,
+  };
+}
+
+function normalizeStringArray(value: unknown): string[] | null {
+  if (!Array.isArray(value)) {
+    return null;
+  }
+  const result = value.filter((entry): entry is string => typeof entry === "string").map((entry) => entry.trim()).filter(Boolean);
+  return result;
 }
 
 function sanitizeSummary(value: Prisma.JsonValue | null): InsightSummary {

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import clsx from "clsx";
 import { gql, useLazyQuery, useMutation, useQuery } from "@apollo/client";
-import { AlertCircle, CheckCircle2 } from "lucide-react";
+import { AlertCircle, CheckCircle2, RefreshCw } from "lucide-react";
 import {
   AISummaryDrawer,
   InlineActionPayload,
@@ -10,8 +10,16 @@ import {
   ScrumQuickGlance,
   TeamMetricsBar,
   UserSummaryCard,
+  formatNarrativeContent,
 } from "../components/scrum";
-import type { DailySummaryRecord, IssueInsight } from "../types/scrum";
+import type {
+  DailySummaryRecord,
+  IssueInsight,
+  ProjectDailySummaryRecord,
+  TaskSummarySnapshotRecord,
+  UserSummarySnapshotRecord,
+  NarrativeVariant,
+} from "../types/scrum";
 import { Modal } from "../components/ui/modal";
 import { Button } from "../components/ui/button";
 
@@ -40,6 +48,7 @@ const SUMMARY_FIELDS = gql`
     createdAt
     updatedAt
     status
+    isUnavailable
     worklogHours
     issueCounts {
       todo
@@ -178,6 +187,260 @@ const REGENERATE_SUMMARY_MUTATION = gql`
   }
 `;
 
+const TASK_SUMMARY_FIELDS = gql`
+  fragment TaskSummaryFields on TaskSummarySnapshot {
+    id
+    projectId
+    issueId
+    userId
+    summaryDate
+    runId
+    createdAt
+    payload {
+      issueId
+      issueKey
+      issueSummary
+      headline
+      status
+      activityBullets
+      nextStep
+      riskFlags
+      totalWorklogMinutes
+      commentCount
+      lastActivityAt
+      timeline {
+        at
+        label
+        actorId
+      }
+      participants {
+        userId
+        displayName
+        contributionMinutes
+        commentCount
+        waitingOn
+      }
+      sentiment {
+        label
+        score
+        provider
+      }
+      linkedResources {
+        label
+        url
+        type
+      }
+    }
+  }
+`;
+
+const USER_SUMMARY_FIELDS = gql`
+  fragment UserSummaryFields on UserSummarySnapshot {
+    id
+    projectId
+    userId
+    summaryDate
+    runId
+    taskSummaryIds
+    createdAt
+    narrative
+    narrativeHash
+    narrativeGeneratedAt
+    richNarratives
+    needsNarrativeRefresh
+    narrativeRefreshRequestedAt
+    narrativeRefreshLockedUntil
+    narrativeRefreshAttempts
+    lastNarrativeError
+    payload {
+      identity {
+        userId
+        trackedUserId
+        displayName
+        jiraAccountId
+      }
+      headline
+      focusNext
+      riskFlags
+      activityMetrics {
+        worklogMinutes
+        tasksTouched
+        doneCount
+        blockerCount
+      }
+      accomplishments {
+        issueId
+        issueKey
+        text
+      }
+      inFlight {
+        issueId
+        issueKey
+        status
+        note
+      }
+      blockers {
+        issueId
+        issueKey
+        description
+        severity
+      }
+      collaborationNotes {
+        partnerUserId
+        partnerDisplayName
+        issueId
+        issueKey
+        note
+      }
+      pendingDecisions {
+        ownedByUser {
+          issueId
+          issueKey
+          description
+        }
+        waitingOnOthers {
+          issueId
+          issueKey
+          description
+        }
+      }
+      mood {
+        label
+        score
+        rationale
+      }
+    }
+  }
+`;
+
+const PROJECT_SUMMARY_FIELDS = gql`
+  fragment ProjectSummaryFields on ProjectSummarySnapshot {
+    id
+    projectId
+    summaryDate
+    runId
+    userSummaryIds
+    createdAt
+    narrative
+    narrativeHash
+    narrativeGeneratedAt
+    richNarratives
+    needsNarrativeRefresh
+    narrativeRefreshRequestedAt
+    narrativeRefreshLockedUntil
+    narrativeRefreshAttempts
+    lastNarrativeError
+    payload {
+      executiveBrief
+      teamHealthSnapshot {
+        activeUsers
+        trackedUsers
+        idleUsers
+        offlineUsers
+        totalWorklogMinutes
+        doneCount
+        blockerCount
+        idleRate
+        blockerRate
+      }
+      topHighlights {
+        issueId
+        issueKey
+        userId
+        text
+      }
+      criticalBlockers {
+        issueId
+        issueKey
+        userId
+        description
+        severity
+      }
+      atRiskWork {
+        flag
+        count
+      }
+      unassignedWatchlist {
+        issueId
+        issueKey
+        issueSummary
+      }
+      callsToAction {
+        text
+        severity
+      }
+      atRiskDetails {
+        issueId
+        issueKey
+        reason
+        severity
+      }
+      workspaceContext
+    }
+  }
+`;
+
+const PROJECT_DAILY_SUMMARIES_QUERY = gql`
+  ${TASK_SUMMARY_FIELDS}
+  ${USER_SUMMARY_FIELDS}
+  ${PROJECT_SUMMARY_FIELDS}
+  query ProjectDailySummaries($projectId: ID!, $range: DateRangeInput!, $includeTasks: Boolean!) {
+    projectDailySummaries(projectId: $projectId, range: $range, includeTasks: $includeTasks) {
+      projectSummary {
+        ...ProjectSummaryFields
+      }
+      userSummaries {
+        ...UserSummaryFields
+      }
+      taskSummaries @include(if: $includeTasks) {
+        ...TaskSummaryFields
+      }
+    }
+  }
+`;
+
+const REGENERATE_PROJECT_SUMMARY_MUTATION = gql`
+  ${TASK_SUMMARY_FIELDS}
+  ${USER_SUMMARY_FIELDS}
+  ${PROJECT_SUMMARY_FIELDS}
+  mutation RegenerateProjectSummary($projectId: ID!, $date: Date) {
+    regenerateProjectSummary(projectId: $projectId, date: $date) {
+      projectSummary {
+        ...ProjectSummaryFields
+      }
+      userSummaries {
+        ...UserSummaryFields
+      }
+      taskSummaries {
+        ...TaskSummaryFields
+      }
+    }
+  }
+`;
+
+const REQUEST_NARRATIVE_REFRESH_MUTATION = gql`
+  mutation RequestNarrativeRefresh(
+    $projectId: ID!
+    $scope: NarrativeScope!
+    $snapshotId: ID
+    $persona: String
+    $days: Int
+    $force: Boolean
+  ) {
+    requestNarrativeRefresh(
+      projectId: $projectId
+      scope: $scope
+      snapshotId: $snapshotId
+      persona: $persona
+      days: $days
+      force: $force
+    ) {
+      queuedProject
+      queuedUser
+    }
+  }
+`;
+
 const ISSUE_INSIGHTS_QUERY = gql`
   query IssueInsights($issueId: ID!, $refresh: Boolean = false) {
     issueInsights(issueId: $issueId, refresh: $refresh) {
@@ -202,6 +465,69 @@ const ISSUE_INSIGHTS_QUERY = gql`
       computedAt
       expiresAt
       providerMetadata
+      provider
+      requirement
+      waitingOn
+      stage {
+        current
+        breakdown {
+          key
+          label
+          total
+          inProgress
+          done
+          todo
+        }
+      }
+      delta {
+        newCommentCount
+        latestCommentAuthors
+        newWorklogHours
+      }
+      history(limit: 5) {
+        id
+        issueId
+        summary {
+          text
+          provider
+          confidence
+        }
+        sentiment {
+          label
+          score
+          tones
+          provider
+        }
+        escalateScore
+        signals {
+          type
+          severity
+          detail
+          metadata
+        }
+        computedAt
+        expiresAt
+        provider
+        providerMetadata
+        requirement
+        waitingOn
+        stage {
+          current
+          breakdown {
+            key
+            label
+            total
+            inProgress
+            done
+            todo
+          }
+        }
+        delta {
+          newCommentCount
+          latestCommentAuthors
+          newWorklogHours
+        }
+      }
     }
   }
 `;
@@ -221,6 +547,12 @@ type ScrumViewMode = "team" | "focus";
 
 const todayIsoDate = () => new Date().toISOString().slice(0, 10);
 
+const addDays = (date: string, days: number): string => {
+  const base = new Date(`${date}T00:00:00.000Z`);
+  base.setUTCDate(base.getUTCDate() + days);
+  return base.toISOString().slice(0, 10);
+};
+
 export function ScrumPage() {
   const [selectedDate, setSelectedDate] = useState<string>(todayIsoDate);
   const [selectedProjectId, setSelectedProjectId] = useState<string | null>(null);
@@ -230,13 +562,22 @@ export function ScrumPage() {
   const [actionModal, setActionModal] = useState<InlineActionPayload | null>(null);
   const [autoRefresh, setAutoRefresh] = useState<boolean>(false);
   const [drawerOpen, setDrawerOpen] = useState<boolean>(false);
-  const overlayEnabled = (import.meta.env.VITE_FEATURE_OVERLAY_ENABLED ?? "false") === "true";
+  const [regenerating, setRegenerating] = useState<boolean>(false);
+  const overlayEnabled = true;
   const [overlayOpen, setOverlayOpen] = useState<boolean>(false);
   const [overlayIssueId, setOverlayIssueId] = useState<string | null>(null);
+  const [overlayIssueFilter, setOverlayIssueFilter] = useState<string[] | null>(null);
+  const [overlayProjectTasks, setOverlayProjectTasks] = useState<TaskSummarySnapshotRecord[] | null>(
+    null,
+  );
+  const [refreshingNarrativeScope, setRefreshingNarrativeScope] = useState<"PROJECT" | "USER" | null>(
+    null,
+  );
   const [insightsByIssueId, setInsightsByIssueId] = useState<Record<string, IssueInsight>>({});
   const [loadingInsightId, setLoadingInsightId] = useState<string | null>(null);
   const inflightInsights = useRef<Set<string>>(new Set());
   const overlayIssueIdRef = useRef<string | null>(null);
+  const projectRangeEnd = useMemo(() => addDays(selectedDate, 1), [selectedDate]);
 
   const {
     data: projectsData,
@@ -282,6 +623,174 @@ export function ScrumPage() {
     [summariesData?.dailySummaries],
   );
 
+  const summaryByIssueId = useMemo(() => {
+    const mapping = new Map<string, string>();
+    for (const summary of summaries) {
+      for (const group of summary.workItems) {
+        for (const item of group.items) {
+          mapping.set(item.issue.id, summary.id);
+        }
+      }
+    }
+    return mapping;
+  }, [summaries]);
+
+  const {
+    data: projectSummariesData,
+    loading: projectSummaryLoading,
+    error: projectSummaryError,
+    refetch: refetchProjectSummary,
+  } = useQuery<{ projectDailySummaries: ProjectDailySummaryRecord[] }>(
+    PROJECT_DAILY_SUMMARIES_QUERY,
+    {
+      variables: selectedProjectId
+        ? {
+            projectId: selectedProjectId,
+            range: { start: selectedDate, end: projectRangeEnd },
+            includeTasks: true,
+          }
+        : undefined,
+      skip: !selectedProjectId,
+      fetchPolicy: "network-only",
+    },
+  );
+
+  const [regenerateSummary] = useMutation(REGENERATE_SUMMARY_MUTATION);
+  const [regenerateProjectSummaryMutation] = useMutation(REGENERATE_PROJECT_SUMMARY_MUTATION);
+  const [requestNarrativeRefreshMutation] = useMutation(REQUEST_NARRATIVE_REFRESH_MUTATION);
+
+  const latestProjectSummary = useMemo(() => {
+    const records = projectSummariesData?.projectDailySummaries ?? [];
+    return records.find((entry) => entry.projectSummary.summaryDate === selectedDate) ?? null;
+  }, [projectSummariesData?.projectDailySummaries, selectedDate]);
+
+  const refreshProjectNarrative = useCallback(async () => {
+    if (!selectedProjectId || !latestProjectSummary) {
+      return;
+    }
+    try {
+      setRefreshingNarrativeScope("PROJECT");
+      await requestNarrativeRefreshMutation({
+        variables: {
+          projectId: selectedProjectId,
+          scope: "PROJECT",
+          snapshotId: latestProjectSummary.projectSummary.id,
+          persona: "manager",
+          force: true,
+        },
+      });
+      setToast({ type: "success", message: "Project story refresh queued" });
+    } catch (mutationError) {
+      setToast({ type: "error", message: friendlyError(mutationError) });
+    } finally {
+      setRefreshingNarrativeScope(null);
+    }
+  }, [latestProjectSummary, requestNarrativeRefreshMutation, selectedProjectId]);
+
+  const projectTaskIndex = useMemo(() => {
+    const index = new Map<string, TaskSummarySnapshotRecord>();
+    if (!latestProjectSummary) {
+      return index;
+    }
+    for (const task of latestProjectSummary.taskSummaries ?? []) {
+      index.set(task.id, task);
+      index.set(task.payload.issueId, task);
+    }
+    return index;
+  }, [latestProjectSummary]);
+
+  const userSummaryIndex = useMemo(() => {
+    const index = new Map<string, UserSummarySnapshotRecord>();
+    if (!latestProjectSummary) {
+      return index;
+    }
+    for (const snapshot of latestProjectSummary.userSummaries) {
+      const identity = snapshot.payload.identity;
+      if (identity.userId) {
+        index.set(`user:${identity.userId}`, snapshot);
+      }
+      if (identity.trackedUserId) {
+        index.set(`tracked:${identity.trackedUserId}`, snapshot);
+      }
+      if (identity.jiraAccountId) {
+        index.set(`account:${identity.jiraAccountId}`, snapshot);
+      }
+    }
+    return index;
+  }, [latestProjectSummary]);
+
+  const selectedSummary = useMemo(
+    () => summaries.find((summary) => summary.id === selectedSummaryId) ?? null,
+    [summaries, selectedSummaryId],
+  );
+
+  const selectedUserSnapshot = useMemo(() => {
+    if (!selectedSummary) {
+      return null;
+    }
+    const keys = [
+      selectedSummary.user?.id ? `user:${selectedSummary.user.id}` : null,
+      selectedSummary.trackedUser?.id ? `tracked:${selectedSummary.trackedUser.id}` : null,
+      selectedSummary.trackedUser?.jiraAccountId
+        ? `account:${selectedSummary.trackedUser.jiraAccountId}`
+        : null,
+      selectedSummary.jiraAccountId ? `account:${selectedSummary.jiraAccountId}` : null,
+    ].filter(Boolean) as string[];
+    for (const key of keys) {
+      const snapshot = userSummaryIndex.get(key);
+      if (snapshot) {
+        return snapshot;
+      }
+    }
+    if (latestProjectSummary) {
+      const displayName =
+        selectedSummary.user?.displayName ??
+        selectedSummary.trackedUser?.displayName ??
+        null;
+      if (displayName) {
+        const fallback = latestProjectSummary.userSummaries.find(
+          (snapshot) => snapshot.payload.identity.displayName === displayName,
+        );
+        if (fallback) {
+          return fallback;
+        }
+      }
+    }
+    return null;
+  }, [latestProjectSummary, selectedSummary, userSummaryIndex]);
+
+  const selectedTaskSummaries = useMemo(() => {
+    if (!selectedUserSnapshot) {
+      return [] as TaskSummarySnapshotRecord[];
+    }
+    return selectedUserSnapshot.taskSummaryIds
+      .map((taskId) => projectTaskIndex.get(taskId))
+      .filter((task): task is TaskSummarySnapshotRecord => Boolean(task));
+  }, [projectTaskIndex, selectedUserSnapshot]);
+
+  const refreshUserNarrative = useCallback(async () => {
+    if (!selectedProjectId || !selectedUserSnapshot) {
+      return;
+    }
+    try {
+      setRefreshingNarrativeScope("USER");
+      await requestNarrativeRefreshMutation({
+        variables: {
+          projectId: selectedProjectId,
+          scope: "USER",
+          snapshotId: selectedUserSnapshot.id,
+          persona: "manager",
+          force: true,
+        },
+      });
+      setToast({ type: "success", message: "Teammate story refresh queued" });
+    } catch (mutationError) {
+      setToast({ type: "error", message: friendlyError(mutationError) });
+    } finally {
+      setRefreshingNarrativeScope(null);
+    }
+  }, [requestNarrativeRefreshMutation, selectedProjectId, selectedUserSnapshot]);
+
   const [fetchIssueInsights, { loading: insightsLoading }] = useLazyQuery<
     { issueInsights: IssueInsight }
   >(ISSUE_INSIGHTS_QUERY, {
@@ -325,6 +834,8 @@ export function ScrumPage() {
     setInsightsByIssueId({});
     inflightInsights.current.clear();
     setLoadingInsightId(null);
+    setOverlayIssueFilter(null);
+    setOverlayProjectTasks(null);
     overlayIssueIdRef.current = null;
   }, [selectedDate, selectedProjectId]);
 
@@ -334,9 +845,21 @@ export function ScrumPage() {
     }
     const timer = window.setInterval(() => {
       void refetchSummaries({ date: selectedDate, projectId: selectedProjectId });
+      void refetchProjectSummary({
+        projectId: selectedProjectId,
+        range: { start: selectedDate, end: projectRangeEnd },
+        includeTasks: true,
+      });
     }, 60000);
     return () => window.clearInterval(timer);
-  }, [autoRefresh, refetchSummaries, selectedDate, selectedProjectId]);
+  }, [
+    autoRefresh,
+    refetchProjectSummary,
+    refetchSummaries,
+    selectedDate,
+    selectedProjectId,
+    projectRangeEnd,
+  ]);
 
   useEffect(() => {
     if (!summaries.length) {
@@ -350,23 +873,19 @@ export function ScrumPage() {
 
   const getDisplayName = (record: DailySummaryRecord) =>
     record.user?.displayName ?? record.trackedUser?.displayName ?? "Unassigned";
-
-  const selectedSummary = useMemo(
-    () => summaries.find((summary) => summary.id === selectedSummaryId) ?? null,
-    [summaries, selectedSummaryId],
-  );
-
   useEffect(() => {
-    if (!overlayEnabled) {
+    if (!overlayEnabled || !overlayOpen) {
       return;
     }
     if (!selectedSummary) {
       setOverlayOpen(false);
       setOverlayIssueId(null);
+      setOverlayIssueFilter(null);
+      setOverlayProjectTasks(null);
     }
-  }, [overlayEnabled, selectedSummary]);
+  }, [overlayEnabled, overlayOpen, selectedSummary]);
 
-  const teamMetrics = useMemo(() => {
+  const legacyTeamMetrics = useMemo(() => {
     if (!summaries.length) {
       return {
         hoursLogged: 0,
@@ -418,6 +937,15 @@ export function ScrumPage() {
     };
   }, [summaries]);
 
+  const legacyProjectMetrics = useMemo(
+    () => ({
+      hoursLogged: legacyTeamMetrics.hoursLogged,
+      done: legacyTeamMetrics.done,
+      blocked: legacyTeamMetrics.blocked,
+    }),
+    [legacyTeamMetrics],
+  );
+
   const lastUpdated = useMemo(() => {
     if (!summaries.length) {
       return null;
@@ -445,8 +973,6 @@ export function ScrumPage() {
     return () => window.clearTimeout(timeout);
   }, [toast]);
 
-  const [regenerateSummary, { loading: regenerating }] = useMutation(REGENERATE_SUMMARY_MUTATION);
-
   const handleDateChange = (value: string) => {
     setSelectedDate(value);
     setSelectedSummaryId(null);
@@ -463,6 +989,11 @@ export function ScrumPage() {
     }
     try {
       await refetchSummaries({ date: selectedDate, projectId: selectedProjectId });
+      await refetchProjectSummary({
+        projectId: selectedProjectId,
+        range: { start: selectedDate, end: projectRangeEnd },
+        includeTasks: true,
+      });
       setToast({ type: "success", message: "Summaries refreshed" });
     } catch (refreshError) {
       setToast({ type: "error", message: friendlyError(refreshError) });
@@ -478,6 +1009,7 @@ export function ScrumPage() {
       return;
     }
     try {
+      setRegenerating(true);
       const teammateName =
         selectedSummary.user?.displayName ?? selectedSummary.trackedUser?.displayName ?? "teammate";
       await regenerateSummary({
@@ -487,10 +1019,23 @@ export function ScrumPage() {
           projectId: selectedProjectId,
         },
       });
+      await regenerateProjectSummaryMutation({
+        variables: {
+          projectId: selectedProjectId,
+          date: selectedDate,
+        },
+      });
       await refetchSummaries({ date: selectedDate, projectId: selectedProjectId });
+      await refetchProjectSummary({
+        projectId: selectedProjectId,
+        range: { start: selectedDate, end: projectRangeEnd },
+        includeTasks: true,
+      });
       setToast({ type: "success", message: `Summary regenerated for ${teammateName}` });
     } catch (mutationError) {
       setToast({ type: "error", message: friendlyError(mutationError) });
+    } finally {
+      setRegenerating(false);
     }
   };
 
@@ -498,9 +1043,20 @@ export function ScrumPage() {
     setActionModal(payload);
   };
 
-  const openDetailView = (issueId?: string | null) => {
-    if (overlayEnabled) {
+  const openDetailView = (
+    issueId?: string | null,
+    options?: { filterIssueIds?: string[] | null; tasks?: TaskSummarySnapshotRecord[] | null },
+  ) => {
+    const filter = options?.filterIssueIds?.filter(Boolean) ?? [];
+    const tasks = options?.tasks ?? null;
+    const shouldOpenOverlay =
+      overlayEnabled && (Boolean(issueId) || filter.length > 0 || (tasks && tasks.length > 0));
+
+    if (shouldOpenOverlay) {
       let resolvedIssueId = issueId ?? null;
+      if (!resolvedIssueId && filter.length) {
+        resolvedIssueId = filter[0] ?? null;
+      }
       if (!resolvedIssueId && selectedSummary) {
         for (const group of selectedSummary.workItems) {
           const candidate = group.items[0]?.issue.id;
@@ -510,13 +1066,25 @@ export function ScrumPage() {
           }
         }
       }
+      setOverlayIssueFilter(filter.length ? filter : null);
+      setOverlayProjectTasks(tasks);
       setOverlayIssueId(resolvedIssueId);
       overlayIssueIdRef.current = resolvedIssueId;
       setOverlayOpen(true);
       setDrawerOpen(false);
-      void ensureInsight(resolvedIssueId);
+      if (resolvedIssueId) {
+        void ensureInsight(resolvedIssueId);
+      }
       return;
     }
+    if (overlayOpen) {
+      setOverlayOpen(false);
+      setOverlayIssueId(null);
+      setOverlayIssueFilter(null);
+      setOverlayProjectTasks(null);
+    }
+    setOverlayIssueFilter(null);
+    setOverlayProjectTasks(null);
     setDrawerOpen(true);
   };
 
@@ -524,8 +1092,9 @@ export function ScrumPage() {
     if (overlayEnabled) {
       setOverlayOpen(false);
       setOverlayIssueId(null);
+      setOverlayIssueFilter(null);
+      setOverlayProjectTasks(null);
       overlayIssueIdRef.current = null;
-      return;
     }
     setDrawerOpen(false);
   };
@@ -540,6 +1109,110 @@ export function ScrumPage() {
     openDetailView();
   };
 
+  const handleOpenAtRiskIssues = (details: ProjectRiskDetail[]) => {
+    if (!details.length) {
+      return;
+    }
+
+    const detailByIssueId = new Map<string, ProjectRiskDetail>();
+    for (const detail of details) {
+      if (detail.issueId) {
+        detailByIssueId.set(detail.issueId, detail);
+      }
+    }
+
+    const uniqueIds = Array.from(detailByIssueId.keys());
+    if (!uniqueIds.length) {
+      return;
+    }
+
+    let targetSummaryId: string | null = null;
+    for (const id of uniqueIds) {
+      const summaryId = summaryByIssueId.get(id);
+      if (summaryId) {
+        targetSummaryId = summaryId;
+        break;
+      }
+    }
+
+    if (targetSummaryId && selectedSummaryId !== targetSummaryId) {
+      setSelectedSummaryId(targetSummaryId);
+    }
+
+    const fallbackTasks = uniqueIds
+      .map((id) => {
+        const existing = projectTaskIndex.get(id);
+        if (existing) {
+          return existing;
+        }
+
+        const detail = detailByIssueId.get(id);
+        if (!detail || !latestProjectSummary) {
+          return null;
+        }
+
+        const headline = detail.reason?.trim() || "Flagged for attention";
+        const severityFlag =
+          detail.severity === "critical"
+            ? "critical_risk"
+            : detail.severity === "warning"
+              ? "caution_risk"
+              : "at_risk";
+
+        const fallback: TaskSummarySnapshotRecord = {
+          id: `at-risk-${id}`,
+          projectId: latestProjectSummary.projectSummary.projectId,
+          issueId: id,
+          userId: null,
+          summaryDate: latestProjectSummary.projectSummary.summaryDate,
+          runId: latestProjectSummary.projectSummary.runId,
+          createdAt: latestProjectSummary.projectSummary.createdAt,
+          payload: {
+            issueId: id,
+            issueKey: detail.issueKey,
+            issueSummary: headline,
+            headline,
+            status: "STALLED",
+            activityBullets: headline ? [headline] : [],
+            nextStep: null,
+            riskFlags: [severityFlag],
+            totalWorklogMinutes: 0,
+            recentWorklogMinutes: 0,
+            commentCount: 0,
+            lastActivityAt: null,
+            timeline: [],
+            participants: [],
+            sentiment: null,
+            linkedResources: [],
+          },
+        };
+
+        return fallback;
+      })
+      .filter((task): task is TaskSummarySnapshotRecord => Boolean(task));
+
+    openDetailView(uniqueIds[0], {
+      filterIssueIds: uniqueIds,
+      tasks: fallbackTasks.length ? fallbackTasks : null,
+    });
+  };
+
+  const handleOpenCallToActionIssues = (issueIds: string[]) => {
+    const uniqueIds = Array.from(new Set(issueIds.filter(Boolean)));
+    if (!uniqueIds.length) {
+      return;
+    }
+
+    const fallbackTasks = uniqueIds
+      .map((id) => projectTaskIndex.get(id))
+      .filter((task): task is TaskSummarySnapshotRecord => Boolean(task));
+
+    openDetailView(uniqueIds[0], {
+      filterIssueIds: uniqueIds,
+      tasks: fallbackTasks.length ? fallbackTasks : null,
+    });
+  };
+
   return (
     <div className="space-y-6 px-4 sm:px-6 lg:px-10 xl:px-16">
       <section className="space-y-6">
@@ -550,7 +1223,7 @@ export function ScrumPage() {
           onDateChange={handleDateChange}
           onProjectChange={handleProjectChange}
           onRefresh={handleRefresh}
-          isRefreshing={summariesLoading}
+          isRefreshing={summariesLoading || projectSummaryLoading}
           projectsLoading={projectsLoading}
           lastUpdated={lastUpdated}
           autoRefresh={autoRefresh}
@@ -558,13 +1231,30 @@ export function ScrumPage() {
         />
 
         <TeamMetricsBar
-          hoursLogged={teamMetrics.hoursLogged}
-          pending={teamMetrics.pending}
-          blocked={teamMetrics.blocked}
-          done={teamMetrics.done}
-          backlog={teamMetrics.backlog}
-          focusHeadline={teamMetrics.headline}
+          hoursLogged={legacyTeamMetrics.hoursLogged}
+          pending={legacyTeamMetrics.pending}
+          blocked={legacyTeamMetrics.blocked}
+          done={legacyTeamMetrics.done}
+          backlog={legacyTeamMetrics.backlog}
+          focusHeadline={legacyTeamMetrics.headline}
         />
+
+        {selectedProjectId ? (
+          projectSummaryLoading && !latestProjectSummary ? (
+            <div className="animate-pulse rounded-3xl border border-slate-200 bg-white p-6 text-sm text-slate-500 dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+              Generating project summary…
+            </div>
+          ) : latestProjectSummary ? (
+            <ProjectOverviewCard
+              summary={latestProjectSummary}
+              onOpenRiskList={handleOpenAtRiskIssues}
+              onOpenCallsList={handleOpenCallToActionIssues}
+              legacyMetrics={legacyProjectMetrics}
+              onRefreshNarrative={refreshProjectNarrative}
+              narrativeRefreshing={refreshingNarrativeScope === "PROJECT"}
+            />
+          ) : null
+        ) : null}
 
         {toast ? <ToastBanner toast={toast} onDismiss={() => setToast(null)} /> : null}
 
@@ -577,6 +1267,12 @@ export function ScrumPage() {
         {summariesError ? (
           <div className="rounded-3xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200">
             {friendlyError(summariesError)}
+          </div>
+        ) : null}
+
+        {projectSummaryError ? (
+          <div className="rounded-3xl border border-rose-200 bg-rose-50 p-6 text-sm text-rose-700 dark:border-rose-900 dark:bg-rose-950/40 dark:text-rose-200">
+            {friendlyError(projectSummaryError)}
           </div>
         ) : null}
 
@@ -707,6 +1403,8 @@ export function ScrumPage() {
           open={overlayOpen && Boolean(selectedSummary)}
           summary={selectedSummary}
           initialIssueId={overlayIssueId}
+          filterIssueIds={overlayIssueFilter}
+          filterTasks={overlayProjectTasks ?? undefined}
           insights={insightsByIssueId}
           loadingIssueId={loadingInsightId}
           insightsLoading={insightsLoading}
@@ -716,15 +1414,19 @@ export function ScrumPage() {
           }}
           onClose={closeDetailView}
         />
-      ) : (
-        <AISummaryDrawer
-          open={drawerOpen && Boolean(selectedSummary)}
-          summary={selectedSummary}
-          regenerating={regenerating}
-          onRegenerate={handleRegenerate}
-          onClose={closeDetailView}
-        />
-      )}
+      ) : null}
+      <AISummaryDrawer
+        open={drawerOpen && Boolean(selectedSummary)}
+        summary={selectedSummary}
+        userSnapshot={selectedUserSnapshot}
+        taskSummaries={selectedTaskSummaries}
+        regenerating={regenerating}
+        onRegenerate={handleRegenerate}
+        onOpenIssue={(issueId) => openDetailView(issueId)}
+        onRefreshNarrative={refreshUserNarrative}
+        narrativeRefreshing={refreshingNarrativeScope === "USER"}
+        onClose={closeDetailView}
+      />
     </div>
   );
 }
@@ -861,6 +1563,401 @@ function modalTitle(action: InlineActionPayload["type"], issueKey: string) {
     return `Reassign ${issueKey}`;
   }
   return `Update ${issueKey} status`;
+}
+
+type ProjectRiskDetail = ProjectDailySummaryRecord["projectSummary"]["payload"]["atRiskDetails"][number];
+
+function ProjectOverviewCard({
+  summary,
+  onOpenRiskList,
+  onOpenCallsList,
+  legacyMetrics,
+  onRefreshNarrative,
+  narrativeRefreshing,
+}: {
+  summary: ProjectDailySummaryRecord;
+  onOpenRiskList: (details: ProjectRiskDetail[]) => void;
+  onOpenCallsList: (issueIds: string[]) => void;
+  legacyMetrics: {
+    hoursLogged: number;
+    done: number;
+    blocked: number;
+  };
+  onRefreshNarrative?: () => void;
+  narrativeRefreshing?: boolean;
+}) {
+  const { projectSummary } = summary;
+  const payload = projectSummary.payload;
+  const metrics = payload.teamHealthSnapshot;
+  const summaryDate = new Date(projectSummary.summaryDate).toLocaleDateString();
+  const legacyHours = legacyMetrics.hoursLogged;
+  const legacyDone = legacyMetrics.done;
+  const legacyBlocked = legacyMetrics.blocked;
+  const showRefreshButton = typeof onRefreshNarrative === "function";
+  const richNarratives = projectSummary.richNarratives as Record<string, NarrativeVariant> | null;
+  const managerNarrativeText = richNarratives?.manager?.text?.trim() ?? projectSummary.narrative?.trim() ?? null;
+  const executiveBriefText = payload.executiveBrief?.trim?.() ?? "";
+  const callIssueIds = useMemo(() => {
+    if (!payload.callsToAction.length) {
+      return [];
+    }
+    const ids = new Set<string>();
+    const keyIndex = new Map<string, string>();
+    for (const task of summary.taskSummaries) {
+      if (task.payload.issueKey) {
+        keyIndex.set(task.payload.issueKey, task.issueId);
+        keyIndex.set(task.payload.issueKey.toUpperCase(), task.issueId);
+      }
+    }
+    for (const action of payload.callsToAction) {
+      const issueKey = extractIssueKey(action.text);
+      if (!issueKey) {
+        continue;
+      }
+      const normalized = issueKey.toUpperCase();
+      const issueId = keyIndex.get(issueKey) ?? keyIndex.get(normalized);
+      if (issueId) {
+        ids.add(issueId);
+      }
+    }
+    return Array.from(ids);
+  }, [payload.callsToAction, summary.taskSummaries]);
+  const narrativeDisplay = managerNarrativeText ?? executiveBriefText;
+  const narrativeNode = formatNarrativeContent(narrativeDisplay);
+  const executiveNode = managerNarrativeText && executiveBriefText && managerNarrativeText !== executiveBriefText
+    ? formatNarrativeContent(executiveBriefText)
+    : null;
+  const workspaceContextNode = payload.workspaceContext
+    ? formatNarrativeContent(payload.workspaceContext)
+    : null;
+
+  return (
+    <section className="space-y-5 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900/70 dark:shadow-slate-950/40">
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <div className="flex flex-col gap-1">
+          <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Project Snapshot
+          </p>
+          <div className="flex flex-wrap items-center gap-2">
+            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{summaryDate}</h3>
+            <div className="rounded-full border border-slate-200 bg-slate-50 px-3 py-1 text-xs text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+              Run {projectSummary.runId.slice(0, 8)}
+            </div>
+          </div>
+        </div>
+        {showRefreshButton ? (
+          <Button
+            type="button"
+            variant="outline"
+            onClick={onRefreshNarrative}
+            disabled={Boolean(narrativeRefreshing)}
+            className="inline-flex items-center gap-2 text-xs"
+          >
+            <RefreshCw className={clsx("h-3.5 w-3.5", narrativeRefreshing ? "animate-spin" : "")} />
+            {narrativeRefreshing ? "Refreshing…" : "Refresh story"}
+          </Button>
+        ) : null}
+      </header>
+
+      <div className="space-y-2 text-sm leading-relaxed text-slate-700 dark:text-slate-300">
+        {narrativeNode}
+        {executiveNode ? (
+          <div className="rounded-2xl border border-slate-200/60 bg-slate-50/70 p-3 text-xs text-slate-500 dark:border-slate-700/60 dark:bg-slate-900/40 dark:text-slate-400">
+            <p className="font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">Executive brief</p>
+            <div className="mt-1 space-y-1 text-slate-600 dark:text-slate-300">{executiveNode}</div>
+          </div>
+        ) : null}
+      </div>
+
+      <div className="grid gap-5 lg:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]">
+        <div className="space-y-5">
+          <div className="grid gap-3 sm:grid-cols-3">
+            <ProjectMetric
+              label="Active"
+              value={`${metrics.activeUsers}/${metrics.trackedUsers}`}
+              hint={`${metrics.offlineUsers} out today`}
+            />
+            <ProjectMetric
+              label="Idle Rate"
+              value={`${Math.round(metrics.idleRate * 100)}%`}
+              hint={`${metrics.idleUsers} teammates idle`}
+            />
+            <ProjectMetric
+              label="Blockers"
+              value={legacyBlocked.toString()}
+              hint={`${Math.round(metrics.blockerRate * 100)}% of team`}
+            />
+            <ProjectMetric
+              label="Out"
+              value={metrics.offlineUsers.toString()}
+              hint="marked unavailable"
+            />
+            <ProjectMetric label="Done" value={legacyDone.toString()} hint="tasks completed" />
+            <ProjectMetric
+              label="Logged"
+              value={`${legacyHours.toFixed(1)}h`}
+              hint="worklog captured"
+            />
+          </div>
+
+          <div className="grid gap-4 md:grid-cols-2">
+            <ProjectList
+              title="Highlights"
+              items={payload.topHighlights.map((item) => ({
+                id: `${item.issueId}-highlight`,
+                primary: item.text,
+                secondary: item.issueKey,
+              }))}
+              emptyLabel="No highlights captured."
+              variant="compact"
+            />
+            <ProjectList
+              title="Critical Blockers"
+              items={payload.criticalBlockers.map((item) => ({
+                id: `${item.issueId}-blocker`,
+                primary: item.description,
+                secondary: `${item.issueKey} · ${item.severity.toUpperCase()}`,
+              }))}
+              emptyLabel="No critical blockers flagged."
+              variant="compact"
+            />
+          </div>
+
+          {workspaceContextNode ? (
+            <section className="space-y-2 rounded-2xl border border-slate-200 bg-slate-50/60 p-4 text-sm text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+              <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                Workspace context
+              </h4>
+              <div className="space-y-1 leading-relaxed">{workspaceContextNode}</div>
+            </section>
+          ) : null}
+        </div>
+
+        <div className="space-y-4">
+          <ProjectSignalsCard
+            calls={payload.callsToAction}
+            callIssueIds={callIssueIds}
+            atRiskAggregated={payload.atRiskWork}
+            atRiskDetails={payload.atRiskDetails}
+            watchlist={payload.unassignedWatchlist}
+            onOpenCalls={onOpenCallsList}
+            onOpenAtRisk={onOpenRiskList}
+          />
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProjectMetric({
+  label,
+  value,
+  hint,
+}: {
+  label: string;
+  value: string;
+  hint?: string;
+}) {
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-slate-50/70 p-4 text-slate-600 dark:border-slate-800 dark:bg-slate-900/40 dark:text-slate-300">
+      <p className="text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">{label}</p>
+      <p className="text-lg font-semibold text-slate-900 dark:text-slate-100">{value}</p>
+      {hint ? <p className="text-xs text-slate-400 dark:text-slate-500">{hint}</p> : null}
+    </div>
+  );
+}
+
+function ProjectSignalsCard({
+  calls,
+  callIssueIds,
+  atRiskAggregated,
+  atRiskDetails,
+  watchlist,
+  onOpenCalls,
+  onOpenAtRisk,
+}: {
+  calls: ProjectDailySummaryRecord["projectSummary"]["payload"]["callsToAction"];
+  callIssueIds: string[];
+  atRiskAggregated: ProjectDailySummaryRecord["projectSummary"]["payload"]["atRiskWork"];
+  atRiskDetails: ProjectDailySummaryRecord["projectSummary"]["payload"]["atRiskDetails"];
+  watchlist: ProjectDailySummaryRecord["projectSummary"]["payload"]["unassignedWatchlist"];
+  onOpenCalls: (issueIds: string[]) => void;
+  onOpenAtRisk: (issueDetails: ProjectRiskDetail[]) => void;
+}) {
+  const severityCounts = calls.reduce<Record<"info" | "warning" | "critical", number>>(
+    (acc, call) => {
+      acc[call.severity] = (acc[call.severity] ?? 0) + 1;
+      return acc;
+    },
+    { info: 0, warning: 0, critical: 0 },
+  );
+
+  const hasCalls = calls.length > 0;
+  const hasRisks = atRiskAggregated.length > 0;
+  const hasWatchlist = watchlist.length > 0;
+  const watchPreview = watchlist.slice(0, 3);
+  const watchRemainder = Math.max(0, watchlist.length - watchPreview.length);
+
+  return (
+    <section className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300">
+      <div className="space-y-3">
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Calls to Action
+          </h4>
+          {hasCalls ? (
+            <>
+              <ul className="flex flex-wrap gap-2">
+                {(["critical", "warning", "info"] as const).map((severity) =>
+                  severityCounts[severity] ? (
+                    <li
+                      key={severity}
+                      className={clsx(
+                        "rounded-full px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide",
+                        severity === "critical"
+                          ? "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200"
+                          : severity === "warning"
+                            ? "bg-amber-100 text-amber-700 dark:bg-amber-900/40 dark:text-amber-200"
+                            : "bg-sky-100 text-sky-700 dark:bg-sky-900/40 dark:text-sky-200",
+                      )}
+                    >
+                      {severity.replace(/_/g, " ")} · {severityCounts[severity]}
+                    </li>
+                  ) : null,
+                )}
+              </ul>
+              <button
+                type="button"
+                onClick={() => onOpenCalls(callIssueIds)}
+                disabled={!callIssueIds.length}
+                className={clsx(
+                  "inline-flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-semibold transition",
+                  callIssueIds.length
+                    ? "border-sky-200 text-sky-700 hover:border-sky-300 hover:text-sky-600 dark:border-sky-800 dark:text-sky-200 dark:hover:border-sky-700"
+                    : "border-slate-200 text-slate-400 dark:border-slate-800 dark:text-slate-600",
+                )}
+              >
+                View {calls.length} call{calls.length === 1 ? "" : "s"}
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-slate-400 dark:text-slate-500">No calls to action.</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-rose-500 dark:text-rose-300">
+            At-Risk
+          </h4>
+          {hasRisks ? (
+            <>
+              <ul className="flex flex-wrap gap-2">
+                {atRiskAggregated.map((item) => (
+                  <li
+                    key={item.flag}
+                    className="rounded-full bg-rose-100 px-2 py-0.5 text-[11px] font-semibold uppercase tracking-wide text-rose-700 dark:bg-rose-900/40 dark:text-rose-200"
+                  >
+                    {item.flag.replace(/_/g, " ")} · {item.count}
+                  </li>
+                ))}
+              </ul>
+              <button
+                type="button"
+                onClick={() => onOpenAtRisk(atRiskDetails)}
+                className="inline-flex items-center gap-2 rounded-full border border-rose-200 px-3 py-1 text-xs font-semibold text-rose-700 transition hover:border-rose-300 hover:text-rose-600 dark:border-rose-800 dark:text-rose-200 dark:hover:border-rose-700"
+              >
+                View {atRiskDetails.length} at-risk issue{atRiskDetails.length === 1 ? "" : "s"}
+              </button>
+            </>
+          ) : (
+            <p className="text-xs text-slate-400 dark:text-slate-500">No risks detected.</p>
+          )}
+        </div>
+
+        <div className="space-y-2">
+          <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+            Unassigned Watchlist
+          </h4>
+          {hasWatchlist ? (
+            <div className="space-y-1">
+              <ul className="space-y-1">
+                {watchPreview.map((item) => (
+                  <li key={item.issueId} className="text-xs text-slate-600 dark:text-slate-300">
+                    <span className="font-semibold text-slate-700 dark:text-slate-200">{item.issueKey}</span>
+                    <span className="ml-2 text-slate-500 dark:text-slate-400">{item.issueSummary}</span>
+                  </li>
+                ))}
+              </ul>
+              {watchRemainder > 0 ? (
+                <p className="text-[11px] text-slate-400 dark:text-slate-500">+{watchRemainder} more awaiting assignment.</p>
+              ) : null}
+            </div>
+          ) : (
+            <p className="text-xs text-slate-400 dark:text-slate-500">No unassigned work drift detected.</p>
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function ProjectList({
+  title,
+  items,
+  emptyLabel,
+  variant = "default",
+}: {
+  title: string;
+  items: Array<{ id: string; primary: string; secondary?: string }>;
+  emptyLabel: string;
+  variant?: "default" | "compact";
+}) {
+  const listClass = variant === "compact" ? "grid gap-1.5" : "grid gap-2";
+  const itemClass =
+    variant === "compact"
+      ? "rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300"
+      : "rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300";
+  const secondaryClass =
+    variant === "compact"
+      ? "text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500"
+      : "text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500";
+  const emptyClass =
+    variant === "compact"
+      ? "rounded-xl border border-dashed border-slate-200 px-3 py-2 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400"
+      : "rounded-2xl border border-dashed border-slate-200 p-3 text-sm text-slate-500 dark:border-slate-700 dark:text-slate-400";
+
+  return (
+    <section className="space-y-2">
+      <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">
+        {title}
+      </h4>
+      {items.length ? (
+        <ul className={listClass}>
+          {items.map((item) => (
+            <li
+              key={item.id}
+              className={itemClass}
+            >
+              <p className="font-medium">{item.primary}</p>
+              {item.secondary ? (
+                <p className={secondaryClass}>{item.secondary}</p>
+              ) : null}
+            </li>
+          ))}
+        </ul>
+      ) : (
+        <p className={emptyClass}>{emptyLabel}</p>
+      )}
+    </section>
+  );
+}
+
+function extractIssueKey(text: string | null | undefined): string | null {
+  if (!text) {
+    return null;
+  }
+  const match = text.match(/\b[A-Z][A-Z0-9]+-\d+\b/);
+  return match ? match[0] : null;
 }
 
 function friendlyError(error: unknown): string {

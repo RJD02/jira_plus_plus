@@ -4,7 +4,7 @@ import {
   type Comment,
   type Issue,
   type JiraProject,
-  type JiraSite,
+  type JiraUser,
   type PrismaClient,
   type ProjectTrackedUser,
   type User,
@@ -87,7 +87,7 @@ type IssueWithDetails = Prisma.IssueGetPayload<{
 }>;
 type IssueWithBrowse = IssueWithDetails & { browseUrl: string | null };
 
-export type DailySummaryStatus = "ON_TRACK" | "DELAYED" | "BLOCKED";
+export type DailySummaryStatus = "ON_TRACK" | "DELAYED" | "BLOCKED" | "OFFLINE";
 
 export interface IssueCounts {
   todo: number;
@@ -128,12 +128,14 @@ export interface DailySummarySnapshot {
   issueCounts: IssueCounts;
   workItems: DailySummaryWorkItemGroup[];
   persisted: boolean;
+  isUnavailable?: boolean;
 }
 
 interface ContributionAccumulator {
   worklogSeconds: number;
   worklogCount: number;
   commentCount: number;
+  mentionCount: number;
   issueTouched: boolean;
 }
 
@@ -162,6 +164,65 @@ function resolveStandupWindow(input: string | Date) {
   return { dayStart, windowStart, windowEnd, recentCutoff };
 }
 
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+interface MentionDetector {
+  accountId: string;
+  patterns: RegExp[];
+}
+
+function buildMentionDetectors(jiraUsers: JiraUser[]): MentionDetector[] {
+  return jiraUsers.map((user) => {
+    const patterns: RegExp[] = [];
+    const accountId = user.accountId;
+    patterns.push(new RegExp(`\\[~${escapeRegExp(accountId)}\\]`, "i"));
+    patterns.push(new RegExp(`\\[~accountid:${escapeRegExp(accountId)}\\]`, "i"));
+
+    const handles = new Set<string>();
+    const displayName = user.displayName?.trim();
+    if (displayName) {
+      const normalized = displayName.toLowerCase();
+      handles.add(normalized);
+      handles.add(normalized.replace(/\s+/g, ""));
+      handles.add(normalized.replace(/\s+/g, "."));
+    }
+    if (user.email) {
+      const emailLower = user.email.toLowerCase();
+      handles.add(emailLower);
+      const localPart = emailLower.split("@")[0];
+      if (localPart) {
+        handles.add(localPart);
+      }
+    }
+    handles.add(accountId.toLowerCase());
+
+    for (const handle of handles) {
+      if (!handle) {
+        continue;
+      }
+      patterns.push(new RegExp(`(^|[^\\w])@${escapeRegExp(handle)}(\\b|[^\\w])`, "i"));
+    }
+
+    return { accountId, patterns };
+  });
+}
+
+function commentMentionsTrackedUser(body: string | null | undefined, detectors: MentionDetector[]): boolean {
+  if (!body || !body.trim() || detectors.length === 0) {
+    return false;
+  }
+  for (const detector of detectors) {
+    for (const pattern of detector.patterns) {
+      if (pattern.test(body)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 function formatSummaryBullet(issue: Issue, details: ContributionAccumulator): string {
   const parts: string[] = [];
   if (details.worklogSeconds > 0) {
@@ -169,6 +230,9 @@ function formatSummaryBullet(issue: Issue, details: ContributionAccumulator): st
   }
   if (details.commentCount > 0) {
     parts.push(`${details.commentCount} comment${details.commentCount > 1 ? "s" : ""}`);
+  }
+  if (details.mentionCount > 0) {
+    parts.push(`${details.mentionCount} mention${details.mentionCount > 1 ? "s" : ""}`);
   }
   if (!parts.length) {
     parts.push("marked progress");
@@ -447,6 +511,7 @@ interface FinalizeSummaryArgs {
   trackedUser: ProjectTrackedUser | null;
   accountIds: string[];
   computation: SummaryComputation;
+  isUnavailable?: boolean;
 }
 
 async function finalizeSummary({
@@ -458,6 +523,7 @@ async function finalizeSummary({
   trackedUser,
   accountIds,
   computation,
+  isUnavailable = false,
 }: FinalizeSummaryArgs): Promise<DailySummarySnapshot> {
   const isoDate = dayStart.toISODate();
   if (!isoDate) {
@@ -514,6 +580,7 @@ async function finalizeSummary({
       issueCounts: computation.issueCounts,
       workItems: computation.workItems,
       persisted: true,
+      isUnavailable,
     };
   }
 
@@ -536,6 +603,7 @@ async function finalizeSummary({
     issueCounts: computation.issueCounts,
     workItems: computation.workItems,
     persisted: false,
+    isUnavailable,
   };
 }
 
@@ -559,6 +627,8 @@ async function generateSummaryForTarget({
   const normalizedAccountIds = normalizeAccountIds(accountIds);
   const { dayStart, windowStart, windowEnd, recentCutoff } = dateInfo;
   const projectId = project.id;
+  const dayEnd = dayStart.plus({ days: 1 });
+  const tenantId = project.tenantId ?? "dev";
 
   if (normalizedAccountIds.length === 0) {
     const displayName = getDisplayName(user, trackedUser);
@@ -580,6 +650,49 @@ async function generateSummaryForTarget({
       trackedUser,
       accountIds: normalizedAccountIds,
       computation,
+    });
+  }
+
+  const availabilityRecord = normalizedAccountIds.length
+    ? await prisma.userAvailability.findFirst({
+        where: {
+          tenantId,
+          jiraAccountId: { in: normalizedAccountIds },
+          startDate: { lt: dayEnd.toJSDate() },
+          endDate: { gt: dayStart.toJSDate() },
+        },
+        orderBy: { startDate: "desc" },
+      })
+    : null;
+
+  if (availabilityRecord) {
+    const displayName = getDisplayName(user, trackedUser);
+    const leaveType = availabilityRecord.type?.trim() || "leave";
+    const reason = availabilityRecord.reason?.trim();
+    const summaryLine = reason
+      ? `${displayName} is out for ${leaveType.toLowerCase()} – ${reason}.`
+      : `${displayName} is out for ${leaveType.toLowerCase()}.`;
+
+    const computation: SummaryComputation = {
+      yesterday: summaryLine,
+      today: summaryLine,
+      blockers: "Unavailable today.",
+      status: "OFFLINE",
+      issueCounts: { ...EMPTY_ISSUE_COUNTS },
+      workItems: [],
+      worklogSeconds: 0,
+    };
+
+    return finalizeSummary({
+      prisma,
+      project,
+      projectId,
+      dayStart,
+      user,
+      trackedUser,
+      accountIds: normalizedAccountIds,
+      computation,
+      isUnavailable: true,
     });
   }
 
@@ -611,12 +724,14 @@ async function generateSummaryForTarget({
   }
 
   const jiraUserIds = jiraUsers.map((jiraUser) => jiraUser.id);
+  const jiraUserIdsSet = new Set(jiraUserIds);
+  const mentionDetectors = buildMentionDetectors(jiraUsers);
 
-  const [worklogs, comments, updatedIssuesRaw, assignedIssuesRaw] = await Promise.all([
+  const [worklogs, rawComments, updatedIssuesRaw, assignedIssuesRaw] = await Promise.all([
     prisma.worklog.findMany({
       where: {
         authorId: { in: jiraUserIds },
-        jiraUpdatedAt: {
+        jiraStartedAt: {
           gte: windowStart.toJSDate(),
           lt: windowEnd.toJSDate(),
         },
@@ -632,7 +747,6 @@ async function generateSummaryForTarget({
     }),
     prisma.comment.findMany({
       where: {
-        authorId: { in: jiraUserIds },
         jiraCreatedAt: {
           gte: windowStart.toJSDate(),
           lt: windowEnd.toJSDate(),
@@ -697,6 +811,24 @@ async function generateSummaryForTarget({
     browseUrl: buildBrowseUrl(issue),
   }));
 
+  const mentionCounts = new Map<string, number>();
+  const commentsAuthoredByUser: typeof rawComments = [];
+  const comments: typeof rawComments = [];
+
+  for (const comment of rawComments) {
+    const isAuthoredByUser = jiraUserIdsSet.has(comment.authorId);
+    const mentionsUser = commentMentionsTrackedUser(comment.body, mentionDetectors);
+    if (mentionsUser) {
+      mentionCounts.set(comment.issueId, (mentionCounts.get(comment.issueId) ?? 0) + 1);
+    }
+    if (isAuthoredByUser || mentionsUser) {
+      comments.push(comment);
+    }
+    if (isAuthoredByUser) {
+      commentsAuthoredByUser.push(comment);
+    }
+  }
+
   const touchedIssueIds = new Set<string>();
   for (const worklog of worklogs) {
     touchedIssueIds.add(worklog.issueId);
@@ -731,6 +863,7 @@ async function generateSummaryForTarget({
       worklogSeconds: 0,
       worklogCount: 0,
       commentCount: 0,
+      mentionCount: 0,
       issueTouched: false,
     });
   }
@@ -745,12 +878,21 @@ async function generateSummaryForTarget({
     bucket.issueTouched = true;
   }
 
-  for (const comment of comments) {
+  for (const comment of commentsAuthoredByUser) {
     const bucket = contributions.get(comment.issueId);
     if (!bucket) {
       continue;
     }
     bucket.commentCount += 1;
+    bucket.issueTouched = true;
+  }
+
+  for (const [issueId, mentionCount] of mentionCounts.entries()) {
+    const bucket = contributions.get(issueId);
+    if (!bucket) {
+      continue;
+    }
+    bucket.mentionCount += mentionCount;
     bucket.issueTouched = true;
   }
 
@@ -781,10 +923,21 @@ async function generateSummaryForTarget({
   const todaySummary = buildTodaySummary(assignedIssues);
   const blockersSummary = buildBlockerSummary(blockerIssues, blockerComments, issueById);
   const issueCounts = summarizeAssignments(assignedIssues);
-  const issuesForGrouping =
-    assignedIssues.length > 0
-      ? assignedIssues.filter((issue) => issueById.has(issue.id))
-      : issues;
+  const issuesForGrouping = (() => {
+    const unique = new Map<string, IssueWithBrowse>();
+    for (const issue of assignedIssues) {
+      if (issueById.has(issue.id)) {
+        unique.set(issue.id, issueById.get(issue.id)!);
+      }
+    }
+    for (const issue of issues) {
+      unique.set(issue.id, issue);
+    }
+    if (unique.size === 0) {
+      return issues;
+    }
+    return Array.from(unique.values());
+  })();
   const workItemGroups = groupWorkItems(issuesForGrouping, worklogs, comments);
 
   const computation: SummaryComputation = {

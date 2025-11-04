@@ -1,10 +1,22 @@
 import { proxyActivities } from '@temporalio/workflow';
-import type * as activities from '../activities/syncActivities.js';
+
+type SyncActivities = typeof import('../activities/syncActivities.js');
+type InsightActivities = typeof import('../activities/insightActivities.js');
+type NarrativeActivities = typeof import('../activities/narrativeActivities.js');
 
 export const SYNC_WORKFLOW_NAME = 'syncProjectWorkflow';
 
-const { prepareProjectSync, syncIssuesBatch, finalizeProjectSync, failProjectSync } =
-  proxyActivities<typeof activities>({
+type Activities = SyncActivities & InsightActivities & NarrativeActivities;
+
+const {
+  prepareProjectSync,
+  syncIssuesBatch,
+  finalizeProjectSync,
+  failProjectSync,
+  requestInsightRefreshWorkflow,
+  countPendingInsightRefreshActivity,
+  requestNarrativeRefreshWorkflow,
+} = proxyActivities<Activities>({
     startToCloseTimeout: '10 minute',
     // heartbeatTimeout: '5 seconds',
     retry: {
@@ -16,6 +28,7 @@ export interface SyncProjectInput {
   projectId: string;
   fullResync?: boolean;
   accountIds?: string[];
+  lookbackDays?: number | null;
 }
 
 export interface SyncCursor {
@@ -29,6 +42,7 @@ export async function syncProjectWorkflow(input: SyncProjectInput): Promise<void
     projectId: input.projectId,
     fullResync: input.fullResync ?? false,
     accountIds: input.accountIds ?? null,
+    lookbackDays: input.lookbackDays ?? null,
   });
 
   if (!config.trackedAccountIds.length) {
@@ -79,6 +93,12 @@ export async function syncProjectWorkflow(input: SyncProjectInput): Promise<void
       lastUpdatedAt: cursor.lastUpdatedAt ?? config.since ?? null,
       message: 'Sync completed successfully',
     });
+
+    const pendingInsights = await countPendingInsightRefreshActivity({ projectId: input.projectId });
+    if (pendingInsights > 0) {
+      await requestInsightRefreshWorkflow({ projectId: input.projectId, batchSize: 25 });
+    }
+    await requestNarrativeRefreshWorkflow({ projectId: input.projectId, persona: "manager" });
   } catch (error) {
     await failProjectSync({
       projectId: input.projectId,

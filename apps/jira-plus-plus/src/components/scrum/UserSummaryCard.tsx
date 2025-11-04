@@ -9,6 +9,7 @@ import {
   Clock3,
   CheckCircle2,
   Sparkles,
+  Moon,
 } from "lucide-react";
 import { Button } from "../ui/button";
 import type { DailySummaryRecord, DailySummaryWorkItem, IssueInsight } from "../../types/scrum";
@@ -48,6 +49,12 @@ const STATUS_UI = {
     badge: "bg-rose-100 text-rose-700 dark:bg-rose-900/40 dark:text-rose-200",
     icon: AlertCircle,
     border: "border-rose-200 dark:border-rose-800",
+  },
+  OFFLINE: {
+    label: "Out of office",
+    badge: "bg-slate-200 text-slate-700 dark:bg-slate-900/50 dark:text-slate-300",
+    icon: Moon,
+    border: "border-slate-200 dark:border-slate-700",
   },
 } as const;
 

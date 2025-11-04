@@ -1,18 +1,33 @@
 import { useEffect, useMemo, useState } from "react";
 import clsx from "clsx";
-import { AlertCircle, ExternalLink, Link2, MessageSquareText, Clock3, FlagTriangleRight } from "lucide-react";
+import {
+  AlertCircle,
+  ExternalLink,
+  Link2,
+  MessageSquareText,
+  Clock3,
+  FlagTriangleRight,
+  FileText,
+  Layers,
+  Activity,
+  History,
+} from "lucide-react";
 import type {
   DailySummaryRecord,
   DailySummaryWorkItem,
   InsightSignal,
   IssueInsight,
+  IssueInsightHistoryEntry,
   IssueLinkRef,
+  TaskSummarySnapshotRecord,
 } from "../../types/scrum";
 
 interface IssueInsightsOverlayProps {
   open: boolean;
   summary: DailySummaryRecord | null;
   initialIssueId: string | null;
+  filterIssueIds?: string[] | null;
+  filterTasks?: TaskSummarySnapshotRecord[] | null;
   insights?: Record<string, IssueInsight>;
   loadingIssueId?: string | null;
   insightsLoading?: boolean;
@@ -38,13 +53,15 @@ export function IssueInsightsOverlay({
   open,
   summary,
   initialIssueId,
+  filterIssueIds,
+  filterTasks,
   insights,
   loadingIssueId,
   insightsLoading,
   onRequestInsight,
   onClose,
 }: IssueInsightsOverlayProps) {
-  const flattenedItems = useMemo<FlattenedWorkItem[]>(() => {
+  const summaryItems = useMemo<FlattenedWorkItem[]>(() => {
     if (!summary) return [];
     return summary.workItems.flatMap((group) =>
       group.items.map((item) => ({
@@ -57,6 +74,29 @@ export function IssueInsightsOverlay({
     );
   }, [summary]);
 
+  const fallbackItems = useMemo<FlattenedWorkItem[]>(() => {
+    if (!filterTasks || !filterTasks.length) {
+      return [];
+    }
+    return filterTasks.map(convertTaskToWorkItem);
+  }, [filterTasks]);
+
+  const combinedItems = useMemo<FlattenedWorkItem[]>(() => {
+    if (fallbackItems.length) {
+      return fallbackItems;
+    }
+    return summaryItems;
+  }, [fallbackItems, summaryItems]);
+
+  const displayItems = useMemo<FlattenedWorkItem[]>(() => {
+    if (!filterIssueIds || filterIssueIds.length === 0) {
+      return combinedItems;
+    }
+    const filterSet = new Set(filterIssueIds);
+    const filtered = combinedItems.filter((item) => filterSet.has(item.issue.id));
+    return filtered.length > 0 ? filtered : combinedItems;
+  }, [combinedItems, filterIssueIds]);
+
   const [activeIssueId, setActiveIssueId] = useState<string | null>(initialIssueId);
 
   useEffect(() => {
@@ -64,17 +104,18 @@ export function IssueInsightsOverlay({
       setActiveIssueId(null);
       return;
     }
-    if (initialIssueId) {
+    const initialMatches = initialIssueId
+      ? displayItems.some((item) => item.issue.id === initialIssueId)
+      : false;
+    if (initialIssueId && initialMatches) {
       setActiveIssueId(initialIssueId);
       return;
     }
-    const first = flattenedItems[0]?.issue.id ?? null;
+    const first = displayItems[0]?.issue.id ?? null;
     setActiveIssueId(first);
-  }, [summary, initialIssueId, flattenedItems]);
+  }, [summary, initialIssueId, displayItems]);
 
-  
-
-  const activeItem = flattenedItems.find((item) => item.issue.id === activeIssueId) ?? flattenedItems[0] ?? null;
+  const activeItem = displayItems.find((item) => item.issue.id === activeIssueId) ?? null;
   const fallbackInsight =
     (activeItem?.issue as unknown as { insight?: IssueInsight | null } | null)?.insight ?? null;
   const activeInsight =
@@ -119,7 +160,7 @@ export function IssueInsightsOverlay({
               Issues
             </h3>
             <div className="space-y-2 overflow-y-auto pr-1" style={{ maxHeight: "calc(90vh - 8rem)" }}>
-              {flattenedItems.map((item) => (
+              {displayItems.map((item) => (
                 <button
                   key={item.issue.id}
                   type="button"
@@ -141,7 +182,7 @@ export function IssueInsightsOverlay({
                   <p className="text-xs text-slate-500 dark:text-slate-400">{item.issue.summary ?? "No summary"}</p>
                 </button>
               ))}
-              {!flattenedItems.length ? (
+              {!displayItems.length ? (
                 <div className="rounded-2xl border border-dashed border-slate-200 p-3 text-xs text-slate-500 dark:border-slate-800 dark:text-slate-400">
                   No Jira issues captured for this teammate.
                 </div>
@@ -181,6 +222,13 @@ function TicketInsightsContent({
   const sentimentScore = insight?.sentiment?.score ?? 0;
   const sentimentProvider = insight?.sentiment?.provider ?? "heuristic";
   const summaryText = insight?.summary?.text ?? (loading ? "Loading AI summary…" : "No AI summary available yet for this issue.");
+  const providerLabel = insight?.provider ?? insight?.summary?.provider ?? "rule_based";
+  const computedAtLabel = insight?.computedAt ? new Date(insight.computedAt).toLocaleString() : null;
+  const stage = insight?.stage ?? null;
+  const delta = insight?.delta ?? null;
+  const waitingOn = insight?.waitingOn ?? [];
+  const requirement = insight?.requirement ?? null;
+  const historyEntries = insight?.history ?? [];
 
   const extractedLinks = useMemo(() => {
     const links = new Set<string>();
@@ -250,6 +298,18 @@ function TicketInsightsContent({
         </dl>
       </section>
 
+      {requirement ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <FileText className="h-3.5 w-3.5" />
+            Business Requirement
+          </div>
+          <p className="mt-2 whitespace-pre-wrap text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+            {requirement}
+          </p>
+        </section>
+      ) : null}
+
       <section className="grid gap-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
         <div className="flex items-center justify-between gap-3">
           <div>
@@ -260,7 +320,8 @@ function TicketInsightsContent({
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">Computing latest insight…</p>
             ) : insight ? (
               <p className="mt-1 text-sm text-slate-500 dark:text-slate-400">
-                Provider: {insight.summary?.provider ?? "rule_based"} · Sentiment ({sentimentProvider}) = {sentimentLabel} (
+                Provider: {providerLabel}
+                {computedAtLabel ? ` · Updated ${computedAtLabel}` : ""} · Sentiment ({sentimentProvider}) = {sentimentLabel} (
                 {sentimentScore.toFixed(2)})
               </p>
             ) : (
@@ -278,6 +339,75 @@ function TicketInsightsContent({
         </p>
         <SignalList signals={insight?.signals ?? []} />
       </section>
+
+      {stage ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+              <Layers className="h-3.5 w-3.5" />
+              Stage Progress
+            </div>
+            <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">
+              Current: {stage.current}
+            </span>
+          </div>
+          <div className="mt-4 grid gap-3 md:grid-cols-2">
+            {stage.breakdown.length ? (
+              stage.breakdown.map((bucket) => <StageBucketCard key={bucket.key} bucket={bucket} />)
+            ) : (
+              <p className="text-sm text-slate-500 dark:text-slate-400">No subtasks or child issues to summarise.</p>
+            )}
+          </div>
+        </section>
+      ) : null}
+
+      {delta ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <Activity className="h-3.5 w-3.5" />
+            Recent Movement
+          </div>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <InsightStat label="New comments" value={delta.newCommentCount.toString()} />
+            <InsightStat
+              label="Latest commenters"
+              value={delta.latestCommentAuthors.length ? delta.latestCommentAuthors.join(", ") : "None"}
+            />
+            <InsightStat label="Worklog hours" value={`${delta.newWorklogHours.toFixed(2)}h`} />
+          </div>
+        </section>
+      ) : null}
+
+      {waitingOn.length ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <FlagTriangleRight className="h-3.5 w-3.5" />
+            Waiting On
+          </div>
+          <ul className="mt-3 space-y-2 text-sm text-slate-600 dark:text-slate-300">
+            {waitingOn.map((entry, index) => (
+              <li key={`${entry}-${index}`} className="flex items-start gap-2">
+                <span className="mt-1 h-1.5 w-1.5 rounded-full bg-slate-300 dark:bg-slate-700" />
+                <span>{entry}</span>
+              </li>
+            ))}
+          </ul>
+        </section>
+      ) : null}
+
+      {historyEntries.length ? (
+        <section className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+          <div className="flex items-center gap-2 text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <History className="h-3.5 w-3.5" />
+            Insight History
+          </div>
+          <div className="mt-4 space-y-3">
+            {historyEntries.map((entry) => (
+              <InsightHistoryCard key={entry.id} entry={entry} />
+            ))}
+          </div>
+        </section>
+      ) : null}
 
       <section className="grid gap-4 rounded-3xl border border-slate-200 bg-white p-6 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
         <h4 className="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
@@ -351,6 +481,104 @@ function TicketInsightsContent({
         </ul>
       </section>
     </div>
+  );
+}
+
+function normalizeStatusLabel(status: string): string {
+  const cleaned = status.replace(/_/g, " ").toLowerCase();
+  return cleaned.replace(/(^|\s)\w/g, (char) => char.toUpperCase());
+}
+
+function convertTaskToWorkItem(task: TaskSummarySnapshotRecord): FlattenedWorkItem {
+  const payload = task.payload;
+  const issue: DailySummaryWorkItem["issue"] = {
+    id: payload.issueId,
+    key: payload.issueKey,
+    summary: payload.issueSummary,
+    status: payload.status,
+    statusCategory: null,
+    priority: null,
+    dueDate: null,
+    resolvedAt: null,
+    startedAt: null,
+    jiraUpdatedAt: payload.lastActivityAt ?? task.createdAt,
+    browseUrl:
+      payload.linkedResources.find((resource) => resource.type === "issue")?.url ?? null,
+    assignee: null,
+    reporter: null,
+    parent: null,
+    linksOut: [],
+    linksIn: [],
+    insight: null,
+    project: null,
+  };
+
+  return {
+    issue,
+    groupStatus: normalizeStatusLabel(payload.status),
+    totalWorklogHours:
+      ((payload.recentWorklogMinutes ?? payload.totalWorklogMinutes ?? 0) as number) / 60,
+    recentWorklogs: [],
+    recentComments: [],
+  };
+}
+
+function StageBucketCard({
+  bucket,
+}: {
+  bucket: { key: string; label: string; total: number; inProgress: number; done: number; todo: number };
+}) {
+  const completion = bucket.total > 0 ? Math.round((bucket.done / bucket.total) * 100) : 0;
+  return (
+    <div className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+      <div className="flex items-center justify-between">
+        <span className="text-sm font-semibold text-slate-800 dark:text-slate-100">{bucket.label}</span>
+        <span className="text-xs font-semibold text-slate-500 dark:text-slate-400">{completion}%</span>
+      </div>
+      <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-slate-200 dark:bg-slate-800">
+        <div className="h-full rounded-full bg-sky-500 dark:bg-sky-400" style={{ width: `${completion}%` }} />
+      </div>
+      <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-500 dark:text-slate-400">
+        <span>Done {bucket.done}/{bucket.total}</span>
+        <span>In progress {bucket.inProgress}</span>
+        <span>Todo {bucket.todo}</span>
+      </div>
+    </div>
+  );
+}
+
+function InsightStat({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="min-w-[140px] rounded-2xl border border-slate-200 bg-white px-4 py-3 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+      <span className="text-xs font-semibold uppercase tracking-wide text-slate-400 dark:text-slate-500">
+        {label}
+      </span>
+      <p className="mt-1 text-sm font-semibold text-slate-700 dark:text-slate-200">{value}</p>
+    </div>
+  );
+}
+
+function InsightHistoryCard({ entry }: { entry: IssueInsightHistoryEntry }) {
+  const sentimentLabel = entry.sentiment?.label ?? "neutral";
+  const sentimentScore = entry.sentiment?.score ?? 0;
+  const providerLabel = entry.provider ?? entry.summary?.provider ?? "rule_based";
+  return (
+    <article className="rounded-2xl border border-slate-200 bg-white p-4 shadow-sm dark:border-slate-800 dark:bg-slate-900/70">
+      <div className="flex items-center justify-between text-xs text-slate-400 dark:text-slate-500">
+        <span>{new Date(entry.computedAt).toLocaleString()}</span>
+        <span>{providerLabel}</span>
+      </div>
+      <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+        {entry.summary?.text ?? "No summary recorded."}
+      </p>
+      <div className="mt-3 flex flex-wrap gap-3 text-xs text-slate-400 dark:text-slate-500">
+        <span>Escalation {entry.escalateScore.toFixed(2)}</span>
+        <span>
+          Sentiment {sentimentLabel} ({sentimentScore.toFixed(2)})
+        </span>
+        {entry.stage?.current ? <span>Stage {entry.stage.current}</span> : null}
+      </div>
+    </article>
   );
 }
 

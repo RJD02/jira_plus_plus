@@ -11,7 +11,7 @@ import {
 import type { SyncCursor } from "../workflows/syncProjectWorkflow.js";
 import { getEnv } from "../../env.js";
 import { recordSyncFailure, recordSyncSuccess } from "../../services/telemetry/syncTelemetryService.js";
-import { ensureIssueInsights, type InsightProvider } from "../../services/insights/insightService.js";
+import { enqueueInsightRefresh } from "../../services/insights/insightQueueService.js";
 
 const ENTITY_KEYS = ["issue", "comment", "worklog"] as const;
 
@@ -22,6 +22,7 @@ interface PrepareProjectSyncArgs {
   projectId: string;
   fullResync: boolean;
   accountIds: string[] | null;
+  lookbackDays: number | null;
 }
 
 interface PrepareProjectSyncResult {
@@ -33,6 +34,7 @@ interface PrepareProjectSyncResult {
   token: string;
   trackedAccountIds: string[];
   since: string | null;
+  lookbackDays: number | null;
 }
 
 interface SyncIssuesBatchArgs extends PrepareProjectSyncResult {
@@ -123,12 +125,17 @@ export async function prepareProjectSync(
     .map((state) => state.lastSyncTime)
     .filter((value): value is Date => Boolean(value));
 
-  const since =
-    !args.fullResync && lastSyncTimes.length > 0
-      ? DateTime.fromJSDate(new Date(Math.min(...lastSyncTimes.map((d) => d.getTime()))))
-          .toUTC()
-          .toISO()
-      : null;
+  let since: string | null = null;
+  if (!args.fullResync) {
+    if (args.lookbackDays !== null && args.lookbackDays >= 0) {
+      const lookbackStart = DateTime.utc().startOf("day").minus({ days: args.lookbackDays });
+      since = lookbackStart.toISO();
+    } else if (lastSyncTimes.length > 0) {
+      since = DateTime.fromJSDate(new Date(Math.min(...lastSyncTimes.map((d) => d.getTime()))))
+        .toUTC()
+        .toISO();
+    }
+  }
 
   await prisma.syncState.updateMany({
     where: { projectId: project.id, entity: { in: ENTITY_KEYS as unknown as string[] } },
@@ -154,6 +161,7 @@ export async function prepareProjectSync(
       details: {
         trackedUsers: trackedAccountIds,
         since,
+        lookbackDays: args.lookbackDays,
       },
     },
   });
@@ -169,6 +177,7 @@ export async function prepareProjectSync(
     token,
     trackedAccountIds,
     since,
+    lookbackDays: args.lookbackDays,
   };
 }
 
@@ -178,7 +187,11 @@ export async function syncIssuesBatch(args: SyncIssuesBatchArgs): Promise<SyncIs
   }
 
   const quotedAccounts = args.trackedAccountIds.map((id) => `"${id}"`).join(", ");
-  let jql = `project = "${args.projectKey}" AND (assignee in (${quotedAccounts}) OR assignee was in (${quotedAccounts}))`;
+  let jql =
+    `project = "${args.projectKey}" AND (` +
+    `assignee in (${quotedAccounts}) OR ` +
+    `assignee was in (${quotedAccounts}) OR ` +
+    `worklogAuthor in (${quotedAccounts}))`;
 
   if (args.cursor.since) {
     const formatted = DateTime.fromISO(args.cursor.since, { zone: "utc" }).toFormat("yyyy/MM/dd HH:mm");
@@ -657,8 +670,9 @@ async function upsertIssueFromDetail(projectId: string, detail: any) {
       },
     });
   }
-  const provider = (getEnv().INSIGHTS_PROVIDER ?? 'auto') as InsightProvider;
-  await ensureIssueInsights(prisma, tenantId, issueRecord.id, provider);
+  if (shouldRefreshInsights(issueRecord, detail, comments, worklogs)) {
+    await enqueueInsightRefresh(prisma, tenantId, issueRecord.id);
+  }
 }
 
 async function upsertJiraUser(user: any, tenantId: string, fallbackKey?: string): Promise<string> {
@@ -689,6 +703,57 @@ async function upsertJiraUser(user: any, tenantId: string, fallbackKey?: string)
   });
 
   return record.id;
+}
+
+function shouldRefreshInsights(
+  issueRecord: Prisma.IssueGetPayload<Prisma.IssueDefaultArgs>,
+  detail: any,
+  comments: any[],
+  worklogs: any[],
+): boolean {
+  if (issueRecord.needsInsightRefresh) {
+    return true;
+  }
+
+  const refreshedAt = issueRecord.insightRefreshedAt;
+  if (!refreshedAt) {
+    return true;
+  }
+
+  const candidates: Date[] = [];
+  const pushIfValid = (value: string | Date | null | undefined) => {
+    if (!value) return;
+    const dateValue = value instanceof Date ? value : new Date(value);
+    if (!Number.isNaN(dateValue.getTime())) {
+      candidates.push(dateValue);
+    }
+  };
+
+  pushIfValid(detail?.fields?.updated);
+  pushIfValid(detail?.fields?.statuscategorychangedate);
+  pushIfValid(issueRecord.jiraUpdatedAt);
+
+  for (const comment of comments) {
+    pushIfValid(comment.updated);
+    pushIfValid(comment.created);
+  }
+
+  for (const worklog of worklogs) {
+    pushIfValid(worklog.updated);
+    pushIfValid(worklog.started);
+  }
+
+  if (!candidates.length) {
+    return true;
+  }
+
+  const latestActivity = candidates.reduce(
+    (latest, current) => (current > latest ? current : latest),
+    candidates[0],
+  );
+
+  const DRIFT_MS = 60_000;
+  return refreshedAt.getTime() + DRIFT_MS < latestActivity.getTime();
 }
 
 

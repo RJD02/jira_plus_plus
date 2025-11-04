@@ -1,0 +1,113 @@
+id: issue-insight.v1
+goal: >
+  You are an insights analyst summarising Jira ticket context for engineering managers.
+  Given the structured data, produce a concise assessment and risks.
+version: 1.0.0
+model:
+  provider: openai
+  name: gpt-4o-mini
+  temperature: 0.2
+template: |
+  You are Jira Insights, an assistant that produces deterministic risk assessments.
+  Use the structured data below to derive a JSON response. Be concise and objective.
+
+  Issue Key: {{issueKey}}
+  Summary: {{issueSummary}}
+  Status: {{issueStatus}} ({{statusCategory}})
+  Priority: {{priority}}
+  Due Date: {{dueDate}}
+  Resolved At: {{resolvedAt}}
+
+  Rule-based summary:
+  {{ruleSummary}}
+
+  Incremental summary:
+  {{incrementalSummary}}
+
+  Heuristic sentiment: {{heuristicSentimentLabel}} ({{heuristicSentimentScore}}). Tones: {{heuristicSentimentTones}}
+
+  Stage summary:
+  {{stageSummary}}
+
+  Recent worklogs:
+  {{recentWorklogs}}
+
+  Recent comments:
+  {{recentComments}}
+
+  Waiting on:
+  {{waitingOn}}
+
+  Additional context:
+  {{additionalNotes}}
+
+  Respond with ONLY valid JSON matching this schema:
+  {
+    "summary": { "text": string, "confidence": number?, "provider": string? },
+    "sentiment": { "label": "positive"|"neutral"|"negative", "score": number, "tones": string[], "provider": string? },
+    "signals": [ { "type": string, "severity": "low"|"medium"|"high", "detail": string, "metadata": object? } ],
+    "escalationScore": number,
+    "expiresAt": string|null,
+    "requirement": string|null,
+    "waitingOn": [string]
+  }
+inputSchema:
+  type: object
+  properties:
+    issueKey:
+      type: string
+    issueSummary:
+      type: string
+    issueStatus:
+      type: string
+    statusCategory:
+      type: string
+    priority:
+      type: string
+    dueDate:
+      type: string
+    resolvedAt:
+      type: string
+    ruleSummary:
+      type: string
+    incrementalSummary:
+      type: string
+    heuristicSentimentLabel:
+      type: string
+    heuristicSentimentScore:
+      type: string
+    heuristicSentimentTones:
+      type: string
+    stageSummary:
+      type: string
+    recentComments:
+      type: string
+    recentWorklogs:
+      type: string
+    waitingOn:
+      type: string
+    additionalNotes:
+      type: string
+  required:
+    - issueKey
+    - issueSummary
+    - issueStatus
+    - statusCategory
+    - priority
+    - dueDate
+    - resolvedAt
+    - ruleSummary
+    - incrementalSummary
+    - heuristicSentimentLabel
+    - heuristicSentimentScore
+    - heuristicSentimentTones
+    - stageSummary
+    - recentComments
+    - recentWorklogs
+    - waitingOn
+    - additionalNotes
+outputSchema:
+  type: string
+cache:
+  enabled: true
+  ttlSeconds: 900

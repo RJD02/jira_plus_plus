@@ -4,6 +4,9 @@ import { fileURLToPath } from "node:url";
 import { NativeConnection, Worker } from "@temporalio/worker";
 import { getEnv } from "../env.js";
 import * as syncActivities from "./activities/syncActivities.js";
+import * as insightActivities from "./activities/insightActivities.js";
+import * as narrativeActivities from "./activities/narrativeActivities.js";
+import * as summaryAutomationActivities from "./activities/summaryAutomationActivities.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -49,7 +52,12 @@ async function run() {
   const worker = await Worker.create({
     connection,
     workflowsPath: workflowsEntry,
-    activities: syncActivities,
+    activities: {
+      ...syncActivities,
+      ...insightActivities,
+      ...narrativeActivities,
+      ...summaryAutomationActivities,
+    },
     taskQueue: env.TEMPORAL_TASK_QUEUE,
   });
 

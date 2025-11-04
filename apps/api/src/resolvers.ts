@@ -2,7 +2,8 @@ import path from "node:path";
 import { promises as fs } from "node:fs";
 import { GraphQLError } from "graphql";
 import { DateResolver, DateTimeResolver, JSONResolver } from "graphql-scalars";
-import { CredentialType, type PrismaClient, type ProjectTrackedUser } from "@platform/cdm";
+import { DateTime } from "luxon";
+import { CredentialType, type Prisma, type PrismaClient, type ProjectTrackedUser } from "@platform/cdm";
 import type { RequestContext } from "./context.js";
 import {
   createAuthToken,
@@ -36,9 +37,22 @@ import { buildManagerSummary, buildPortfolioManagerSummary } from "./services/ma
 import {
   getIssueInsights,
   mapInsightRecord,
+  mapSnapshotRecord,
   type InsightProvider,
   type IssueInsightDTO,
 } from "./services/insights/insightService.js";
+import {
+  fetchLatestProjectSummary,
+  fetchProjectSummaries,
+  generateHierarchicalSummariesForDate,
+} from "./services/hierarchicalSummaryService.js";
+import { triggerNarrativeRefresh } from "./services/narratives/narrativeTriggerService.js";
+import { sendDailySummaryNewsletter } from "./services/newsletter/dailyNewsletterService.js";
+import {
+  ensureProjectSummarySchedule,
+  updateProjectSummarySchedule as updateProjectSummaryScheduleService,
+  recordProjectSummaryRunSuccess,
+} from "./services/projectSummaryAutomationService.js";
 
 function requireUser(ctx: RequestContext) {
   if (!ctx.user) {
@@ -65,6 +79,33 @@ const runAsTenant = <T>(ctx: RequestContext, fn: (tx: PrismaClient) => Promise<T
   ctx.withTenant(fn);
 
 function mapInsightToGraphQL(dto: IssueInsightDTO) {
+  const stage = dto.stage
+    ? {
+        current: dto.stage.currentStage,
+        breakdown: dto.stage.breakdown,
+      }
+    : null;
+  const delta = dto.delta
+    ? {
+        newCommentCount: dto.delta.newCommentCount,
+        latestCommentAuthors: dto.delta.latestCommentAuthors,
+        newWorklogHours: dto.delta.newWorklogHours,
+      }
+    : null;
+  const waitingFromMetadata = Array.isArray(dto.waitingOn) ? dto.waitingOn : [];
+  const waitingFromSignals = dto.signals
+    .filter((signal) => signal.type === "waiting_on_dependency" && signal.metadata && Array.isArray((signal.metadata as Record<string, unknown>).owners))
+    .flatMap((signal) =>
+      ((signal.metadata as Record<string, unknown>).owners as unknown[]).filter(
+        (owner): owner is string => typeof owner === "string",
+      ),
+    );
+  const waitingOn = Array.from(new Set([...waitingFromMetadata, ...waitingFromSignals].filter(Boolean)));
+  const requirement = dto.requirement ?? (typeof dto.providerMetadata?.requirement === "string"
+    ? (dto.providerMetadata?.requirement as string)
+    : null);
+  const provider = dto.provider ?? dto.summary.provider ?? "rule_based";
+
   return {
     issueId: dto.issueId,
     summary: dto.summary,
@@ -77,6 +118,11 @@ function mapInsightToGraphQL(dto: IssueInsightDTO) {
     computedAt: dto.computedAt,
     expiresAt: dto.expiresAt ?? null,
     providerMetadata: dto.providerMetadata ?? {},
+    provider,
+    stage,
+    delta,
+    requirement,
+    waitingOn,
   };
 }
 
@@ -178,6 +224,34 @@ export const resolvers = {
         }),
       );
     },
+    userAvailability: async (
+      _parent: unknown,
+      args: { accountId?: string | null; from?: Date | null; to?: Date | null },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const where: Record<string, unknown> = {};
+      if (args.accountId) {
+        where.jiraAccountId = args.accountId;
+      }
+      const dateFilters: Record<string, unknown>[] = [];
+      if (args.from) {
+        dateFilters.push({ endDate: { gte: args.from } });
+      }
+      if (args.to) {
+        dateFilters.push({ startDate: { lte: args.to } });
+      }
+      if (dateFilters.length) {
+        where.AND = dateFilters;
+      }
+      return runAsTenant(ctx, (prisma) =>
+        prisma.userAvailability.findMany({
+          where,
+          orderBy: [{ startDate: "asc" }, { endDate: "asc" }],
+          include: { project: true },
+        }),
+      );
+    },
     issueInsights: async (
       _parent: unknown,
       args: { issueId: string; provider?: string; refresh?: boolean },
@@ -231,6 +305,51 @@ export const resolvers = {
           }
         }
         return generateSummariesForDate(prisma, args.date, args.projectId);
+      });
+    },
+    projectDailySummaries: async (
+      _parent: unknown,
+      args: { projectId: string; range: { start: string; end: string }; includeTasks?: boolean },
+      ctx: RequestContext,
+    ) => {
+      const auth = requireUser(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        if (auth.role !== "ADMIN") {
+          const membership = await prisma.userProjectLink.count({
+            where: { projectId: args.projectId, userId: auth.id },
+          });
+          if (!membership) {
+            throw new GraphQLError("You do not have access to this project", {
+              extensions: { code: "FORBIDDEN" },
+            });
+          }
+        }
+        return fetchProjectSummaries(
+          prisma,
+          args.projectId,
+          { start: args.range.start, end: args.range.end },
+          Boolean(args.includeTasks),
+        );
+      });
+    },
+    latestProjectSummary: async (
+      _parent: unknown,
+      args: { projectId: string },
+      ctx: RequestContext,
+    ) => {
+      const auth = requireUser(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        if (auth.role !== "ADMIN") {
+          const membership = await prisma.userProjectLink.count({
+            where: { projectId: args.projectId, userId: auth.id },
+          });
+          if (!membership) {
+            throw new GraphQLError("You do not have access to this project", {
+              extensions: { code: "FORBIDDEN" },
+            });
+          }
+        }
+        return fetchLatestProjectSummary(prisma, args.projectId);
       });
     },
     scrumProjects: async (_parent: unknown, _args: unknown, ctx: RequestContext) => {
@@ -666,6 +785,7 @@ export const resolvers = {
         });
 
         await initializeProjectSync(prisma, project.id);
+        await ensureProjectSummarySchedule(prisma, ctx.tenantId, project.id);
         await triggerProjectSync(prisma, project.id, { full: true });
         await updateNextRunFromSchedule(prisma, project.id);
 
@@ -854,17 +974,113 @@ export const resolvers = {
     },
     triggerProjectSync: async (
       _parent: unknown,
-      args: { projectId: string; full?: boolean; accountIds?: string[] | null },
+      args: { projectId: string; full?: boolean; accountIds?: string[] | null; days?: number | null },
       ctx: RequestContext,
     ) => {
       requireAdmin(ctx);
-      await runAsTenant(ctx, (prisma) =>
-        triggerProjectSync(prisma, args.projectId, {
+      await runAsTenant(ctx, (prisma) => {
+        const options: {
+          full?: boolean;
+          accountIds?: string[];
+          days?: number | null;
+        } = {
           full: args.full ?? false,
           accountIds: args.accountIds ?? undefined,
+        };
+
+        if (typeof args.days === "number") {
+          options.days = args.days;
+        }
+
+        return triggerProjectSync(prisma, args.projectId, options);
+      });
+      return true;
+    },
+    createUserAvailability: async (
+      _parent: unknown,
+      args: {
+        input: {
+          projectId?: string | null;
+          jiraAccountId: string;
+          startDate: Date;
+          endDate: Date;
+          type?: string | null;
+          reason?: string | null;
+        };
+      },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const { projectId, jiraAccountId, startDate, endDate, type, reason } = args.input;
+      if (!(startDate instanceof Date) || Number.isNaN(startDate.getTime())) {
+        throw new GraphQLError("Invalid start date", { extensions: { code: "BAD_USER_INPUT" } });
+      }
+      if (!(endDate instanceof Date) || Number.isNaN(endDate.getTime())) {
+        throw new GraphQLError("Invalid end date", { extensions: { code: "BAD_USER_INPUT" } });
+      }
+      if (endDate <= startDate) {
+        throw new GraphQLError("End date must be after start date", {
+          extensions: { code: "BAD_USER_INPUT" },
+        });
+      }
+
+      return runAsTenant(ctx, (prisma) =>
+        prisma.userAvailability.create({
+          data: {
+            tenantId: ctx.tenantId,
+            projectId: projectId ?? null,
+            jiraAccountId,
+            startDate,
+            endDate,
+            type: type?.trim() || "leave",
+            source: "manual",
+            reason: reason?.trim() || null,
+          },
         }),
       );
-      return true;
+    },
+    deleteUserAvailability: async (
+      _parent: unknown,
+      args: { id: string },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        const record = await prisma.userAvailability.findFirst({
+          where: { id: args.id, tenantId: ctx.tenantId },
+        });
+        if (!record) {
+          throw new GraphQLError("Availability entry not found", {
+            extensions: { code: "NOT_FOUND" },
+          });
+        }
+        await prisma.userAvailability.delete({ where: { id: record.id } });
+        return true;
+      });
+    },
+    requestNarrativeRefresh: async (
+      _parent: unknown,
+      args: {
+        projectId: string;
+        scope: "PROJECT" | "USER";
+        snapshotId?: string | null;
+        persona?: string | null;
+        days?: number | null;
+        force?: boolean | null;
+      },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      return runAsTenant(ctx, (prisma) =>
+        triggerNarrativeRefresh(prisma, ctx.tenantId, {
+          scope: args.scope,
+          projectId: args.projectId,
+          snapshotId: args.snapshotId ?? null,
+          persona: args.persona ?? null,
+          days: args.days ?? null,
+          force: args.force ?? false,
+        }),
+      );
     },
     generateDailySummaries: async (
       _parent: unknown,
@@ -948,6 +1164,128 @@ export const resolvers = {
         });
       });
     },
+    regenerateProjectSummary: async (
+      _parent: unknown,
+      args: { projectId: string; date?: string | null },
+      ctx: RequestContext,
+    ) => {
+      const auth = requireUser(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        if (auth.role !== "ADMIN") {
+          const membership = await prisma.userProjectLink.count({
+            where: { projectId: args.projectId, userId: auth.id },
+          });
+          if (!membership) {
+            throw new GraphQLError("You do not have access to this project", {
+              extensions: { code: "FORBIDDEN" },
+            });
+          }
+        }
+        const targetDate = args.date ?? new Date().toISOString().slice(0, 10);
+        return generateHierarchicalSummariesForDate(prisma, targetDate, args.projectId);
+      });
+    },
+    backfillProjectSummaries: async (
+      _parent: unknown,
+      args: { projectId: string; days?: number },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const requested = args.days ?? 15;
+      const days = Math.max(1, Math.min(requested, 60));
+
+      return runAsTenant(ctx, async (prisma) => {
+        const today = DateTime.utc().startOf("day");
+        let runsGenerated = 0;
+
+        for (let offset = 0; offset < days; offset += 1) {
+          const targetDate = today.minus({ days: offset }).toISODate();
+          if (!targetDate) {
+            continue;
+          }
+          await generateHierarchicalSummariesForDate(prisma, targetDate, args.projectId);
+          runsGenerated += 1;
+        }
+
+        return {
+          projectId: args.projectId,
+          daysRequested: days,
+          runsGenerated,
+        };
+      });
+    },
+    updateProjectSummarySchedule: async (
+      _parent: unknown,
+      args: { projectId: string; input: { enabled?: boolean; frequencyMinutes?: number } },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      return runAsTenant(ctx, async (prisma) => {
+        const project = await prisma.jiraProject.findFirst({
+          where: { id: args.projectId, tenantId: ctx.tenantId },
+        });
+        if (!project) {
+          throw new GraphQLError("Project not found", {
+            extensions: { code: "NOT_FOUND" },
+          });
+        }
+        return updateProjectSummaryScheduleService(prisma, ctx.tenantId, args.projectId, args.input);
+      });
+    },
+    triggerProjectSummaryAutomation: async (
+      _parent: unknown,
+      args: { projectId: string },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      await runAsTenant(ctx, async (prisma) => {
+        const project = await prisma.jiraProject.findFirst({
+          where: { id: args.projectId, tenantId: ctx.tenantId },
+        });
+        if (!project) {
+          throw new GraphQLError("Project not found", {
+            extensions: { code: "NOT_FOUND" },
+          });
+        }
+        const schedule = await ensureProjectSummarySchedule(prisma, ctx.tenantId, args.projectId);
+        const timestamp = DateTime.utc();
+        await generateHierarchicalSummariesForDate(prisma, timestamp.toISODate(), args.projectId);
+        await recordProjectSummaryRunSuccess(
+          prisma,
+          schedule.id,
+          schedule.frequencyMinutes,
+          timestamp,
+        );
+      });
+      return true;
+    },
+    sendDailyNewsletter: async (
+      _parent: unknown,
+      args: { date?: Date | null; projectId?: string | null },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const targetDate = args.date ?? new Date();
+      await runAsTenant(ctx, (prisma) =>
+        sendDailySummaryNewsletter(prisma, ctx.tenantId, targetDate, {
+          projectId: args.projectId ?? null,
+        }),
+      );
+      return true;
+    },
+  },
+  UserAvailability: {
+    project: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.project) {
+        return parent.project;
+      }
+      if (!parent.projectId) {
+        return null;
+      }
+      return runAsTenant(ctx, (prisma) =>
+        prisma.jiraProject.findUnique({ where: { id: parent.projectId } }),
+      );
+    },
   },
   JiraProject: {
     site: (parent: any, _args: unknown, ctx: RequestContext) => {
@@ -978,6 +1316,14 @@ export const resolvers = {
           where: { projectId: parent.id },
           orderBy: { entity: "asc" },
         }),
+      );
+    },
+    summarySchedule: (parent: any, _args: unknown, ctx: RequestContext) => {
+      if (parent.summarySchedule) {
+        return parent.summarySchedule;
+      }
+      return runAsTenant(ctx, (prisma) =>
+        ensureProjectSummarySchedule(prisma, ctx.tenantId, parent.id),
       );
     },
   },
@@ -1019,6 +1365,12 @@ export const resolvers = {
   },
   DailySummary: {
     user: (parent: any) => parent.user ?? null,
+    isUnavailable: (parent: any) => {
+      if (typeof parent.isUnavailable === "boolean") {
+        return parent.isUnavailable;
+      }
+      return parent.status === "OFFLINE";
+    },
     trackedUser: async (parent: any, _args: unknown, ctx: RequestContext) => {
       if (parent.trackedUser) {
         return parent.trackedUser;
@@ -1123,4 +1475,68 @@ export const resolvers = {
       );
     },
   },
+  IssueInsight: {
+    history: async (
+      parent: any,
+      args: { limit?: number },
+      ctx: RequestContext,
+    ) => {
+      const take = Math.min(Math.max(args.limit ?? 5, 1), 50);
+      const rawSnapshots = await runAsTenant(ctx, (prisma) =>
+        prisma.issueInsightSnapshot.findMany({
+          where: { issueId: parent.issueId },
+          orderBy: { createdAt: "desc" },
+          take: Math.min(take * 5, 100),
+        }),
+      );
+      const snapshots = dedupeInsightSnapshots(rawSnapshots, take);
+      return snapshots.map((snapshot) => {
+        const dto = mapSnapshotRecord(snapshot);
+        const payload = mapInsightToGraphQL(dto);
+        return {
+          id: dto.snapshotId ?? snapshot.id,
+          ...payload,
+        };
+      });
+    },
+  },
 };
+
+function dedupeInsightSnapshots(
+  snapshots: Array<Prisma.IssueInsightSnapshotGetPayload<Prisma.IssueInsightSnapshotDefaultArgs>>,
+  limit: number,
+) {
+  const seenKeys = new Set<string>();
+  const unique: typeof snapshots = [];
+
+  for (const snapshot of snapshots) {
+    const key = snapshot.inputsHash ?? buildSnapshotFallbackKey(snapshot);
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    unique.push(snapshot);
+    if (unique.length >= limit) {
+      break;
+    }
+  }
+
+  return unique;
+}
+
+function buildSnapshotFallbackKey(
+  snapshot: Prisma.IssueInsightSnapshotGetPayload<Prisma.IssueInsightSnapshotDefaultArgs>,
+): string {
+  const provider = snapshot.provider ?? "unknown";
+  const summaryText = extractSummaryText(snapshot.summary);
+  const stage = snapshot.statusStage ?? "";
+  return `${provider}::${stage}::${summaryText}`;
+}
+
+function extractSummaryText(value: Prisma.JsonValue | null | undefined): string {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return "";
+  }
+  const maybeText = (value as Record<string, unknown>).text;
+  return typeof maybeText === "string" ? maybeText.trim() : "";
+}

@@ -27,10 +27,12 @@
     "db:down": "dotenv -e .env -- docker compose -f infra/docker-compose.yml -f infra/docker-compose.data.yml down --remove-orphans",
     "stack:up": "dotenv -e .env -- docker compose -f infra/docker-compose.yml up -d",
     "stack:down": "dotenv -e .env -- docker compose -f infra/docker-compose.yml down",
-    "migrate": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma migrate dev --schema prisma/schema.prisma",
+    "migrate": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma migrate deploy --schema prisma/schema.prisma",
+    "migrate:dev": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma migrate dev --schema prisma/schema.prisma",
     "migrate:deploy": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma migrate deploy --schema prisma/schema.prisma",
     "migrate:status": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma migrate status --schema prisma/schema.prisma",
-    "prisma:generate": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma generate --schema prisma/schema.prisma"
+    "prisma:generate": "dotenv -e .env -- pnpm --filter @platform/cdm exec -- prisma generate --schema prisma/schema.prisma",
+    "start": "pnpm bootstrap && pnpm prisma:generate && pnpm db:up && pnpm migrate && pnpm dev:all"
   },
   "devDependencies": {
     "cypress": "^13.13.1",
