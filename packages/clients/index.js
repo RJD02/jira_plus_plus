@@ -1,1 +1,1 @@
-export { withTenant } from "./pgTenant";
+export { withTenant } from "./pgTenant.js";

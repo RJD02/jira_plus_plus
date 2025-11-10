@@ -12,14 +12,19 @@ COPY apps/api/package.json apps/api/package.json
 COPY apps/api/tsconfig.json apps/api/tsconfig.json
 COPY apps/api/prisma apps/api/prisma
 COPY tsconfig.base.json ./
+COPY packages/cdm/package.json packages/cdm/package.json
+COPY packages/clients/package.json packages/clients/package.json
+COPY packages/llm-core-runtime/package.json packages/llm-core-runtime/package.json
+COPY packages/cdm/prisma packages/cdm/prisma
 
 # Install dependencies
-RUN pnpm install --frozen-lockfile --filter @jira-plus-plus/api... \
-  && pnpm --filter @jira-plus-plus/api prisma generate --schema prisma/schema.prisma
+RUN pnpm install --frozen-lockfile \
+  && pnpm --filter @platform/cdm exec -- prisma generate --schema prisma/schema.prisma
 
 # Build stage
 FROM base AS build
 COPY apps/api apps/api
+COPY packages packages
 RUN pnpm --filter @jira-plus-plus/api build
 
 # Runtime stage
@@ -32,8 +37,13 @@ RUN corepack enable && corepack prepare pnpm@8.15.3 --activate
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
 COPY apps/api/package.json apps/api/package.json
 COPY apps/api/prisma apps/api/prisma
-RUN pnpm install --frozen-lockfile --filter @jira-plus-plus/api...
-RUN pnpm --filter @jira-plus-plus/api prisma generate --schema prisma/schema.prisma
+COPY packages/cdm/package.json packages/cdm/package.json
+COPY packages/clients/package.json packages/clients/package.json
+COPY packages/llm-core-runtime/package.json packages/llm-core-runtime/package.json
+COPY packages/cdm/prisma packages/cdm/prisma
+COPY packages packages
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @platform/cdm exec -- prisma generate --schema prisma/schema.prisma
 ENV NODE_ENV=production
 COPY --from=build /app/apps/api/dist /app/apps/api/dist
 COPY apps/api/docker-entrypoint.sh /app/docker-entrypoint.sh
@@ -41,4 +51,4 @@ RUN chmod +x /app/docker-entrypoint.sh
 
 EXPOSE 4000
 ENTRYPOINT ["/app/docker-entrypoint.sh"]
-CMD ["node", "apps/api/dist/index.js"]
+CMD ["node", "--experimental-specifier-resolution=node", "apps/api/dist/index.js"]

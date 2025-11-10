@@ -24,8 +24,9 @@ export default function App() {
 
 function Shell() {
   const { user } = useAuth();
+  const appBrand = import.meta.env.VITE_APP_BRAND ?? "Nucleus Console";
   const navigationItems = useMemo(() => {
-    const base = [{ to: "/", label: "Home" }];
+    const base = [{ to: "/", label: "Overview" }];
     if (!user) {
       return base;
     }
@@ -49,7 +50,7 @@ function Shell() {
         <div className="flex items-center justify-between gap-4 px-6 py-4 sm:px-8">
           <div className="flex items-center gap-10">
             <h1 className="text-xl font-semibold tracking-tight text-slate-800 dark:text-slate-100">
-              Jira++
+              {appBrand}
             </h1>
             <nav className="hidden items-center gap-1 md:flex">
               {navigationItems.map((item) => (

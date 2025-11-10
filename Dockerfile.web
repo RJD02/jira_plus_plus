@@ -9,19 +9,19 @@ WORKDIR /app
 RUN corepack enable && corepack prepare pnpm@8.15.3 --activate
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/web/package.json apps/web/package.json
-COPY apps/web/vite.config.ts apps/web/vite.config.ts
+COPY apps/jira-plus-plus/package.json apps/jira-plus-plus/package.json
+COPY apps/jira-plus-plus/vite.config.ts apps/jira-plus-plus/vite.config.ts
 COPY tsconfig.base.json ./
 
-RUN pnpm install --frozen-lockfile --filter @jira-plus-plus/web...
+RUN pnpm install --frozen-lockfile --filter @apps/jira-plus-plus...
 
 FROM base AS build
-COPY apps/web apps/web
-RUN pnpm --filter @jira-plus-plus/web build
+COPY apps/jira-plus-plus apps/jira-plus-plus
+RUN pnpm --filter @apps/jira-plus-plus build
 
 FROM node:20-alpine AS runtime
 WORKDIR /app
 RUN npm install -g serve
-COPY --from=build /app/apps/web/dist ./dist
+COPY --from=build /app/apps/jira-plus-plus/dist ./dist
 EXPOSE 3000
 CMD ["serve", "-s", "dist", "-l", "3000"]

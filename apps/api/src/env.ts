@@ -60,6 +60,8 @@ const envSchema = z.object({
     .union([z.literal("true"), z.literal("false")])
     .optional(),
   SMTP_FROM_EMAIL: z.string().email().optional(),
+  REPORTING_API_ENDPOINT: z.string().optional(),
+  REPORTING_API_TENANT_ID: z.string().optional(),
 });
 
 type EnvShape = z.infer<typeof envSchema>;

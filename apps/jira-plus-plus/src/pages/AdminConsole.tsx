@@ -11,6 +11,26 @@ import { BarChart3, Clock3, Link2, Mail, PlusCircle, ServerCog, ShieldCheck, Use
 import { Button } from "../components/ui/button";
 import { Modal } from "../components/ui/modal";
 import { useAuth } from "../providers/AuthProvider";
+type ReportingDefinition = {
+  id: string;
+  slug: string;
+  name: string;
+  type: string;
+  personaTags: string[];
+  currentVersion?: { id: string; status: string; publishedAt?: string | null } | null;
+};
+
+type ReportingRun = {
+  id: string;
+  reportVersionId: string;
+  status: string;
+  executedAt: string;
+  durationMs: number;
+  cacheHit: boolean;
+  workflowId?: string | null;
+  temporalRunId?: string | null;
+  error?: string | null;
+};
 
 const ADMIN_CONSOLE_QUERY = gql`
   query AdminConsoleData {
@@ -190,6 +210,39 @@ const UPDATE_PROJECT_SUMMARY_SCHEDULE_MUTATION = gql`
       lastRunAt
       lastError
       lastErrorAt
+    }
+  }
+`;
+
+const REPORTING_DEFINITIONS_QUERY = gql`
+  query ReportingDefinitions {
+    reportingDefinitions {
+      id
+      slug
+      name
+      type
+      personaTags
+      currentVersion {
+        id
+        status
+        publishedAt
+      }
+    }
+  }
+`;
+
+const REPORTING_RUNS_QUERY = gql`
+  query ReportingRuns($filter: ReportingRunFilterInput) {
+    reportingRuns(filter: $filter) {
+      id
+      reportVersionId
+      status
+      executedAt
+      durationMs
+      cacheHit
+      workflowId
+      temporalRunId
+      error
     }
   }
 `;
@@ -387,6 +440,14 @@ type AdminConsoleData = {
   }>;
 };
 
+type ReportingDefinitionsData = {
+  reportingDefinitions: ReportingDefinition[];
+};
+
+type ReportingRunsData = {
+  reportingRuns: ReportingRun[];
+};
+
 type UserProjectLinksData = {
   userProjectLinks: Array<{
     id: string;
@@ -483,6 +544,7 @@ const sidebarSections = [
   { id: "users", label: "Directory", icon: <Users className="h-4 w-4" /> },
   { id: "availability", label: "Availability", icon: <Clock3 className="h-4 w-4" /> },
   { id: "newsletter", label: "Newsletter", icon: <Mail className="h-4 w-4" /> },
+  { id: "reporting", label: "Reporting", icon: <BarChart3 className="h-4 w-4" /> },
   { id: "mappings", label: "Account Mapping", icon: <Link2 className="h-4 w-4" /> },
 ] as const;
 
@@ -585,14 +647,87 @@ export function AdminConsolePage() {
   });
   const [weekendSubmitting, setWeekendSubmitting] = useState(false);
 
+  const reportingDesignerUrl = import.meta.env.VITE_REPORTING_DESIGNER_URL ?? "http://localhost:5175";
+  const [reportingRunStatus, setReportingRunStatus] = useState<string>("");
+  const [reportingRunDefinitionId, setReportingRunDefinitionId] = useState<string>("");
+
+  const {
+    data: reportingDefinitionsData,
+    loading: reportingDefinitionsLoading,
+    error: reportingDefinitionsError,
+  } = useQuery<ReportingDefinitionsData>(REPORTING_DEFINITIONS_QUERY, {
+    fetchPolicy: "cache-and-network",
+  });
+
+  const reportingDefinitions = reportingDefinitionsData?.reportingDefinitions ?? [];
+  const reportingLoading = reportingDefinitionsLoading;
+  const reportingError = reportingDefinitionsError?.message ?? null;
+
+  useEffect(() => {
+    if (reportingDefinitions.length === 0) {
+      if (reportingRunDefinitionId) {
+        setReportingRunDefinitionId("");
+      }
+      return;
+    }
+    if (!reportingRunDefinitionId) {
+      const firstPublished = reportingDefinitions.find((definition) => definition.currentVersion)?.currentVersion?.id ?? "";
+      if (firstPublished) {
+        setReportingRunDefinitionId(firstPublished);
+      }
+      return;
+    }
+    const currentExists = reportingDefinitions.some(
+      (definition) => definition.currentVersion?.id === reportingRunDefinitionId,
+    );
+    if (!currentExists) {
+      const fallback =
+        reportingDefinitions.find((definition) => definition.currentVersion)?.currentVersion?.id ?? "";
+      if (fallback !== reportingRunDefinitionId) {
+        setReportingRunDefinitionId(fallback);
+      }
+    }
+  }, [reportingDefinitions, reportingRunDefinitionId]);
+
+  const reportingRunVariables = useMemo(() => {
+    const filter: { status?: string; reportVersionId?: string } = {};
+    if (reportingRunStatus) {
+      filter.status = reportingRunStatus;
+    }
+    if (reportingRunDefinitionId) {
+      filter.reportVersionId = reportingRunDefinitionId;
+    }
+    return Object.keys(filter).length ? { filter } : {};
+  }, [reportingRunStatus, reportingRunDefinitionId]);
+
+  const skipReportingRuns = Boolean(reportingDefinitionsError);
+
+  const {
+    data: reportingRunsData,
+    loading: reportingRunsLoadingResult,
+    error: reportingRunsErrorResult,
+  } = useQuery<ReportingRunsData>(REPORTING_RUNS_QUERY, {
+    variables: reportingRunVariables,
+    fetchPolicy: "cache-and-network",
+    skip: skipReportingRuns,
+  });
+
+  const reportingRuns = reportingRunsData?.reportingRuns ?? [];
+  const reportingRunsLoading = skipReportingRuns ? false : reportingRunsLoadingResult;
+  const reportingRunsError =
+    skipReportingRuns && reportingError ? reportingError : reportingRunsErrorResult?.message ?? null;
+
   const [fetchLinks, { data: linkData, loading: linksLoading, refetch: refetchLinks }] =
     useLazyQuery<UserProjectLinksData>(USER_LINKS_QUERY);
-
   useEffect(() => {
     if (selectedUserId) {
       void fetchLinks({ variables: { userId: selectedUserId } });
     }
   }, [fetchLinks, selectedUserId]);
+
+  const handleOpenReportingDesigner = () => {
+    window.open(reportingDesignerUrl, "_blank", "noopener,noreferrer");
+  };
 
   const {
     data: availabilityData,
@@ -1698,6 +1833,146 @@ export function AdminConsolePage() {
               Managers with Jira++ access are included automatically. Content is sourced from the
               latest hierarchical summaries captured for the chosen date.
             </p>
+          </div>
+        </section>
+
+        <section
+          id="reporting"
+          className="mt-8 rounded-3xl border border-slate-200 bg-white p-8 shadow-lg shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900 dark:shadow-slate-950/70"
+        >
+          <SectionHeader
+            title="Reporting"
+            description="Review published report definitions and jump into the designer for deeper changes."
+            action={
+              <Button type="button" onClick={handleOpenReportingDesigner}>
+                Open designer
+              </Button>
+            }
+          />
+          <div className="mt-4 space-y-6">
+            {reportingError ? <InlineMessage tone="error">{reportingError}</InlineMessage> : null}
+            {reportingLoading ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-4 py-6 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                Loading report definitions…
+              </div>
+            ) : reportingDefinitions.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-white/80 px-4 py-6 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                No report definitions found. Use the designer to create your first reporting data app.
+              </div>
+            ) : (
+              <div className="space-y-3">
+                {reportingDefinitions.map((definition) => (
+                  <div
+                    key={definition.id}
+                    className="flex items-center justify-between rounded-2xl border border-slate-200 bg-white/90 px-4 py-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60"
+                  >
+                    <div className="space-y-1">
+                      <h4 className="text-sm font-semibold text-slate-900 dark:text-slate-100">{definition.name}</h4>
+                      <p className="text-xs text-slate-500 dark:text-slate-400">
+                        Slug {definition.slug} · Type {definition.type}
+                      </p>
+                      {definition.personaTags.length ? (
+                        <p className="text-xs text-slate-500 dark:text-slate-400">
+                          Personas: {definition.personaTags.join(", ")}
+                        </p>
+                      ) : null}
+                    </div>
+                    <div>
+                      {definition.currentVersion ? (
+                        <span className="inline-flex items-center rounded-full bg-slate-900/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-slate-700 dark:bg-slate-100/10 dark:text-slate-200">
+                          {definition.currentVersion.status}
+                        </span>
+                      ) : (
+                        <span className="inline-flex items-center rounded-full bg-amber-500/15 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-amber-600 dark:bg-amber-500/10 dark:text-amber-200">
+                          Unpublished
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <div className="space-y-3 rounded-2xl border border-slate-200 bg-white/90 p-4 shadow-sm dark:border-slate-700 dark:bg-slate-900/60">
+              <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                <div className="flex flex-col gap-2 text-sm text-slate-600 dark:text-slate-300">
+                  <span className="font-semibold text-slate-800 dark:text-slate-100">Run history filters</span>
+                  <div className="flex flex-col gap-2 md:flex-row md:items-center md:gap-4">
+                    <label className="flex flex-col text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Report version
+                      <select
+                        className="mt-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                        value={reportingRunDefinitionId}
+                        onChange={(event) => setReportingRunDefinitionId(event.target.value)}
+                      >
+                        <option value="">All versions</option>
+                        {reportingDefinitions
+                          .map((definition) => definition.currentVersion)
+                          .filter(Boolean)
+                          .map((version) => (
+                            <option key={version!.id} value={version!.id}>
+                              {version!.id.slice(0, 8)} · {version!.status}
+                            </option>
+                          ))}
+                      </select>
+                    </label>
+                    <label className="flex flex-col text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">
+                      Status
+                      <select
+                        className="mt-1 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm text-slate-900 focus:border-slate-400 focus:outline-none focus:ring-2 focus:ring-slate-300 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:focus:ring-slate-600"
+                        value={reportingRunStatus}
+                        onChange={(event) => setReportingRunStatus(event.target.value)}
+                      >
+                        <option value="">All statuses</option>
+                        <option value="QUEUED">Queued</option>
+                        <option value="IN_PROGRESS">In progress</option>
+                        <option value="COMPLETED">Completed</option>
+                        <option value="FAILED">Failed</option>
+                      </select>
+                    </label>
+                  </div>
+                </div>
+              </div>
+              {reportingRunsError ? <InlineMessage tone="error">{reportingRunsError}</InlineMessage> : null}
+              {reportingRunsLoading ? (
+                <div className="rounded-xl border border-dashed border-slate-200 bg-white/70 px-4 py-4 text-sm text-slate-500 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
+                  Loading run history…
+                </div>
+              ) : reportingRuns.length === 0 ? (
+                <p className="text-sm text-slate-500 dark:text-slate-400">No runs recorded for the selected filters.</p>
+              ) : (
+                <div className="overflow-x-auto">
+                  <table className="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
+                    <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-900/40 dark:text-slate-400">
+                      <tr>
+                        <th className="px-4 py-3 font-semibold">Executed at</th>
+                        <th className="px-4 py-3 font-semibold">Status</th>
+                        <th className="px-4 py-3 font-semibold">Duration</th>
+                        <th className="px-4 py-3 font-semibold">Workflow</th>
+                        <th className="px-4 py-3 font-semibold">Error</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 dark:divide-slate-800">
+                      {reportingRuns.map((run) => (
+                        <tr key={run.id} className="bg-white dark:bg-slate-900/30">
+                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                            {formatDateTime(run.executedAt)}
+                          </td>
+                          <td className="px-4 py-3 text-xs font-semibold uppercase tracking-wide">{run.status}</td>
+                          <td className="px-4 py-3 text-xs text-slate-600 dark:text-slate-300">
+                            {(run.durationMs / 1000).toFixed(1)}s
+                          </td>
+                          <td className="px-4 py-3 text-xs text-slate-500 dark:text-slate-400">
+                            {run.workflowId ? run.workflowId.slice(0, 12) : "—"}
+                          </td>
+                          <td className="px-4 py-3 text-xs text-rose-500 dark:text-rose-300">{run.error ?? "—"}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+            </div>
           </div>
         </section>
 

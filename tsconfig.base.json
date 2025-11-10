@@ -11,7 +11,15 @@
     "baseUrl": ".",
     "paths": {
       "@platform/cdm": ["packages/cdm"],
-      "@platform/clients": ["packages/clients"]
+      "@platform/clients": ["packages/clients"],
+      "@metadata/query": ["packages/metadata-client/src"],
+      "@metadata/client": ["packages/metadata-client/src"],
+      "@metadata/core": ["packages/metadata-core/src"],
+      "@reporting/catalog": ["packages/reporting-catalog/src"],
+      "@reporting/registry": ["packages/reporting-registry/src"],
+      "@reporting/sandbox": ["packages/reporting-sandbox/src"],
+      "@reporting/temporal": ["packages/reporting-temporal/src"],
+      "@reporting/ui-sdk": ["packages/reporting-ui-sdk/src"]
     }
   }
 }

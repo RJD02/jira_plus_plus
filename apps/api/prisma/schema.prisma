@@ -103,8 +103,6 @@ model ProjectSummarySchedule {
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
   project          JiraProject @relation(fields: [projectId], references: [id])
-
-  @@unique([projectId])
 }
 
 model ProjectTrackedUser {

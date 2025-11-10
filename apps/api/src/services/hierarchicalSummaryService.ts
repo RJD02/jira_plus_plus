@@ -6,8 +6,8 @@ import type {
   DailySummarySnapshot,
   DailySummaryWorkItem,
   DailySummaryWorkItemGroup,
-} from "./dailySummaryService";
-import { generateSummariesForDate } from "./dailySummaryService";
+} from "./dailySummaryService.js";
+import { generateSummariesForDate } from "./dailySummaryService.js";
 
 export type TaskSummaryStatus = "BLOCKED" | "IN_PROGRESS" | "IN_REVIEW" | "DONE" | "STALLED";
 
@@ -184,6 +184,8 @@ export interface ProjectSummarySnapshotRecord {
   userSummaryIds: string[];
   createdAt: string;
   payload: ProjectSummaryPayload;
+  projectName?: string | null;
+  projectKey?: string | null;
   narrative?: string | null;
   narrativeHash?: string | null;
   narrativeGeneratedAt?: string | null;
@@ -203,7 +205,9 @@ export interface ProjectDailySummaryRecord {
 
 type TaskSummarySnapshotEntity = Prisma.TaskSummarySnapshotGetPayload<Prisma.TaskSummarySnapshotDefaultArgs>;
 type UserSummarySnapshotEntity = Prisma.UserSummarySnapshotGetPayload<Prisma.UserSummarySnapshotDefaultArgs>;
-type ProjectSummarySnapshotEntity = Prisma.ProjectSummarySnapshotGetPayload<Prisma.ProjectSummarySnapshotDefaultArgs>;
+type ProjectSummarySnapshotEntity = Prisma.ProjectSummarySnapshotGetPayload<{
+  include: { project: { select: { name: true; key: true } } };
+}>;
 
 type PrismaExecutor = PrismaClient | Prisma.TransactionClient;
 
@@ -285,6 +289,14 @@ export async function fetchProjectSummaries(
       },
     },
     orderBy: [{ summaryDate: "desc" }, { createdAt: "desc" }],
+    include: {
+      project: {
+        select: {
+          name: true,
+          key: true,
+        },
+      },
+    },
   });
 
   const userSummaries = await prisma.userSummarySnapshot.findMany({
@@ -325,6 +337,14 @@ export async function fetchLatestProjectSummary(
   const latest = await prisma.projectSummarySnapshot.findFirst({
     where: { projectId },
     orderBy: [{ summaryDate: "desc" }, { createdAt: "desc" }],
+    include: {
+      project: {
+        select: {
+          name: true,
+          key: true,
+        },
+      },
+    },
   });
 
   if (!latest) {
@@ -506,6 +526,14 @@ async function persistProjectSummary(
         },
       } satisfies Record<string, unknown>,
     } as any,
+    include: {
+      project: {
+        select: {
+          name: true,
+          key: true,
+        },
+      },
+    },
   });
   return mapProjectSummaryRecord(created);
 }
@@ -1485,6 +1513,8 @@ export function mapProjectSummaryRecord(record: ProjectSummarySnapshotEntity): P
   return {
     id: record.id,
     projectId: record.projectId,
+    projectName: record.project?.name ?? null,
+    projectKey: record.project?.key ?? null,
     summaryDate: formatDateOnly(record.summaryDate),
     runId: record.runId,
     userSummaryIds: record.userSummaryIds,

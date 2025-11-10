@@ -53,6 +53,7 @@ import {
   updateProjectSummarySchedule as updateProjectSummaryScheduleService,
   recordProjectSummaryRunSuccess,
 } from "./services/projectSummaryAutomationService.js";
+import { getReportingRegistryClient } from "./services/reportingRegistryService.js";
 
 function requireUser(ctx: RequestContext) {
   if (!ctx.user) {
@@ -124,6 +125,10 @@ function mapInsightToGraphQL(dto: IssueInsightDTO) {
     requirement,
     waitingOn,
   };
+}
+
+function ensureError(value: unknown): Error {
+  return value instanceof Error ? value : new Error(typeof value === "string" ? value : JSON.stringify(value));
 }
 
 export const resolvers = {
@@ -251,6 +256,58 @@ export const resolvers = {
           include: { project: true },
         }),
       );
+    },
+    reportingDefinitions: async (_parent: unknown, _args: unknown, ctx: RequestContext) => {
+      requireAdmin(ctx);
+      const client = getReportingRegistryClient();
+      if (!client) {
+        throw new GraphQLError("Reporting API is not configured", {
+          extensions: { code: "SERVICE_UNAVAILABLE" },
+        });
+      }
+      try {
+        const definitions = await client.listReports();
+        return definitions.map((definition) => ({
+          ...definition,
+          personaTags: Array.isArray(definition.personaTags) ? definition.personaTags : [],
+          currentVersion: definition.currentVersion ?? null,
+        }));
+      } catch (error) {
+        throw new GraphQLError("Failed to load reporting definitions", {
+          extensions: { code: "EXTERNAL_SERVICE_ERROR" },
+          originalError: ensureError(error),
+        });
+      }
+    },
+    reportingRuns: async (
+      _parent: unknown,
+      args: { filter?: { status?: string | null; reportVersionId?: string | null } | null },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const client = getReportingRegistryClient();
+      if (!client) {
+        throw new GraphQLError("Reporting API is not configured", {
+          extensions: { code: "SERVICE_UNAVAILABLE" },
+        });
+      }
+      try {
+        const runs = await client.listRuns({
+          status: args.filter?.status ?? undefined,
+          reportVersionId: args.filter?.reportVersionId ?? undefined,
+        });
+        return runs.map((run) => ({
+          ...run,
+          error: run.error ?? null,
+          workflowId: run.workflowId ?? null,
+          temporalRunId: run.temporalRunId ?? null,
+        }));
+      } catch (error) {
+        throw new GraphQLError("Failed to load reporting runs", {
+          extensions: { code: "EXTERNAL_SERVICE_ERROR" },
+          originalError: ensureError(error),
+        });
+      }
     },
     issueInsights: async (
       _parent: unknown,
@@ -520,6 +577,16 @@ export const resolvers = {
         throw error;
       }
     },
+  },
+  ReportingDefinition: {
+    personaTags: (parent: { personaTags?: string[] | null }) =>
+      Array.isArray(parent.personaTags) ? parent.personaTags : [],
+    currentVersion: (parent: { currentVersion?: unknown | null }) => parent.currentVersion ?? null,
+  },
+  ReportingRun: {
+    workflowId: (parent: { workflowId?: string | null }) => parent.workflowId ?? null,
+    temporalRunId: (parent: { temporalRunId?: string | null }) => parent.temporalRunId ?? null,
+    error: (parent: { error?: string | null }) => parent.error ?? null,
   },
   Mutation: {
     login: async (

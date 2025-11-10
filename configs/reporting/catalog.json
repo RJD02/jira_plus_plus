@@ -1,0 +1,94 @@
+[
+  {
+    "id": "jira_issues_summary",
+    "displayName": "Jira Issues Summary",
+    "description": "Curated rollup of Jira issues with project, status, assignee, and sprint metadata.",
+    "source": "cdm.jira_issues",
+    "fields": [
+      { "name": "issue_key", "type": "string", "description": "Human readable Jira key (e.g. ABC-123)" },
+      { "name": "project_key", "type": "string", "description": "Owning Jira project key" },
+      { "name": "project_name", "type": "string", "description": "Owning Jira project name" },
+      { "name": "status", "type": "string", "description": "Current Jira status" },
+      { "name": "assignee", "type": "string", "description": "Current issue assignee display name" },
+      { "name": "story_points", "type": "number", "description": "Story points estimate" },
+      { "name": "updated_at", "type": "datetime", "description": "Last sync timestamp" }
+    ]
+  },
+  {
+    "id": "daily_summary_metrics",
+    "displayName": "Daily Summary Metrics",
+    "description": "Per-project snapshot of daily standup metrics and sentiment scores.",
+    "source": "cdm.daily_summary",
+    "fields": [
+      { "name": "summary_date", "type": "date", "description": "Snapshot date (UTC)" },
+      { "name": "project_id", "type": "string", "description": "Platform project identifier" },
+      { "name": "project_name", "type": "string", "description": "Human readable project name" },
+      { "name": "active_users", "type": "number", "description": "Active contributors for the day" },
+      { "name": "blocker_count", "type": "number", "description": "Number of blockers detected" },
+      { "name": "mood_score", "type": "number", "description": "Average sentiment score" }
+    ]
+  },
+  {
+    "id": "project_health_trends",
+    "displayName": "Project Health Trends",
+    "description": "Blended health indicators combining Jira scope, incident load, and sentiment for leadership dashboards.",
+    "source": "cdm.project_health_history",
+    "labels": ["executive", "health"],
+    "projectIds": ["global"],
+    "fields": [
+      { "name": "snapshot_date", "type": "date", "description": "Date the metric bundle was captured" },
+      { "name": "project_key", "type": "string", "description": "Project identifier" },
+      { "name": "health_score", "type": "number", "description": "0-100 composite health score" },
+      { "name": "risk_level", "type": "string", "description": "Categorical risk flag (low/medium/high)" },
+      { "name": "open_blockers", "type": "number", "description": "Open blockers impacting delivery" },
+      { "name": "last_incident_at", "type": "datetime", "description": "Timestamp of most recent sev1/sev2 incident" }
+    ]
+  },
+  {
+    "id": "sprint_velocity_summary",
+    "displayName": "Sprint Velocity Summary",
+    "description": "Aggregated sprint velocity and commitment accuracy for delivery managers.",
+    "source": "cdm.sprint_velocity",
+    "labels": ["delivery", "agile"],
+    "fields": [
+      { "name": "project_key", "type": "string", "description": "Owning project key" },
+      { "name": "sprint_name", "type": "string", "description": "Sprint label from Jira" },
+      { "name": "start_date", "type": "date", "description": "Sprint start" },
+      { "name": "end_date", "type": "date", "description": "Sprint end" },
+      { "name": "committed_points", "type": "number", "description": "Points planned" },
+      { "name": "completed_points", "type": "number", "description": "Points delivered" },
+      { "name": "scope_change", "type": "number", "description": "Delta in committed scope after sprint start" }
+    ]
+  },
+  {
+    "id": "incident_response_digest",
+    "displayName": "Incident Response Digest",
+    "description": "Operational snapshot of incidents, MTTR, and follow-up status.",
+    "source": "cdm.incident_summary",
+    "labels": ["sre", "operations"],
+    "fields": [
+      { "name": "incident_id", "type": "string", "description": "Primary incident identifier" },
+      { "name": "project_key", "type": "string", "description": "Impacted project" },
+      { "name": "severity", "type": "string", "description": "Incident severity" },
+      { "name": "opened_at", "type": "datetime", "description": "Start timestamp" },
+      { "name": "resolved_at", "type": "datetime", "description": "End timestamp" },
+      { "name": "mttr_minutes", "type": "number", "description": "Mean-time-to-resolve for the incident" },
+      { "name": "postmortem_status", "type": "string", "description": "Follow-up doc or action item state" }
+    ]
+  },
+  {
+    "id": "engineer_focus_matrix",
+    "displayName": "Engineer Focus Matrix",
+    "description": "Weekly aggregation of engineer focus areas, interrupts, and context-switch cost.",
+    "source": "cdm.engineer_focus",
+    "labels": ["people", "productivity"],
+    "fields": [
+      { "name": "week_start", "type": "date", "description": "Week beginning (Monday)" },
+      { "name": "engineer_id", "type": "string", "description": "Internal engineer identifier" },
+      { "name": "primary_initiative", "type": "string", "description": "Declared primary initiative" },
+      { "name": "active_projects", "type": "number", "description": "Count of concurrent projects touched" },
+      { "name": "interrupt_hours", "type": "number", "description": "Hours spent on interrupts/escalations" },
+      { "name": "focus_score", "type": "number", "description": "Derived score representing focus time quality" }
+    ]
+  }
+]

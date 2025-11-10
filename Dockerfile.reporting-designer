@@ -1,0 +1,29 @@
+# syntax=docker/dockerfile:1
+
+FROM node:20-alpine AS base
+ARG REPORTING_API_URL="http://localhost:4002"
+ENV VITE_REPORTING_API_URL=$REPORTING_API_URL
+WORKDIR /app
+RUN corepack enable && corepack prepare pnpm@8.15.3 --activate
+
+COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY packages/reporting-registry/package.json packages/reporting-registry/package.json
+COPY packages/reporting-ui-sdk/package.json packages/reporting-ui-sdk/package.json
+COPY apps/reporting-designer/package.json apps/reporting-designer/package.json
+COPY apps/reporting-designer/vite.config.ts apps/reporting-designer/vite.config.ts
+COPY tsconfig.base.json ./
+
+RUN pnpm install --frozen-lockfile --filter @apps/reporting-designer...
+
+FROM base AS build
+COPY packages/reporting-registry packages/reporting-registry
+COPY packages/reporting-ui-sdk packages/reporting-ui-sdk
+COPY apps/reporting-designer apps/reporting-designer
+RUN pnpm --filter @reporting/registry build && pnpm --filter @reporting/ui-sdk build && pnpm --filter @apps/reporting-designer build
+
+FROM node:20-alpine AS runtime
+WORKDIR /app
+RUN npm install -g serve
+COPY --from=build /app/apps/reporting-designer/dist ./dist
+EXPOSE 5175
+CMD ["serve", "-s", "dist", "-l", "5175"]

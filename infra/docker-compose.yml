@@ -24,6 +24,9 @@ services:
     container_name: jira_api
     env_file:
       - ../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SHADOW_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
     depends_on:
       postgres:
         condition: service_healthy
@@ -43,6 +46,9 @@ services:
     container_name: jira_worker
     env_file:
       - ../.env
+    environment:
+      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SHADOW_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
     depends_on:
       api:
         condition: service_healthy

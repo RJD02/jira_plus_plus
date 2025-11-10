@@ -9,8 +9,8 @@ import {
   mapProjectSummaryRecord,
   mapTaskSummaryRecord,
   mapUserSummaryRecord,
-} from "../hierarchicalSummaryService";
-import type { NarrativeScope } from "./narrativeQueueService";
+} from "../hierarchicalSummaryService.js";
+import type { NarrativeScope } from "./narrativeQueueService.js";
 
 export interface GenerateNarrativeOptions {
   persona?: string;

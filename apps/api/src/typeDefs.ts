@@ -787,6 +787,38 @@ export const typeDefs = gql`
     user: User!
   }
 
+  type ReportingVersion {
+    id: ID!
+    status: String!
+    publishedAt: DateTime
+  }
+
+  type ReportingDefinition {
+    id: ID!
+    slug: String!
+    name: String!
+    type: String!
+    personaTags: [String!]!
+    currentVersion: ReportingVersion
+  }
+
+  type ReportingRun {
+    id: ID!
+    reportVersionId: ID!
+    status: String!
+    executedAt: DateTime!
+    durationMs: Int!
+    cacheHit: Boolean!
+    workflowId: String
+    temporalRunId: String
+    error: String
+  }
+
+  input ReportingRunFilterInput {
+    status: String
+    reportVersionId: ID
+  }
+
   type Query {
     health: HealthCheck!
     me: User
@@ -808,6 +840,8 @@ export const typeDefs = gql`
     managerSummary(projectId: ID, sprintId: ID): ManagerSummary!
     issueInsights(issueId: ID!, provider: InsightsProvider = AUTO, refresh: Boolean = false): IssueInsight!
     userAvailability(accountId: String, from: Date, to: Date): [UserAvailability!]!
+    reportingDefinitions: [ReportingDefinition!]!
+    reportingRuns(filter: ReportingRunFilterInput): [ReportingRun!]!
   }
 
   type JiraProjectOption {
