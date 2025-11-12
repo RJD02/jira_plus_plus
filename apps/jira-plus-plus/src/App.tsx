@@ -1,5 +1,5 @@
-import { NavLink, Navigate, Route, Routes } from "react-router-dom";
-import { useMemo } from "react";
+import { NavLink, Navigate, Route, Routes, useLocation } from "react-router-dom";
+import { useEffect, useMemo, useRef } from "react";
 import clsx from "clsx";
 import { HomePage } from "./pages/HomePage";
 import { ScrumPage } from "./pages/ScrumPage";
@@ -11,6 +11,7 @@ import { AuthProvider, useAuth } from "./providers/AuthProvider";
 import { ThemeToggle } from "./components/ui/theme-toggle";
 import { apolloClient } from "./lib/apollo-client";
 import { UserMenu } from "./components/user/UserMenu";
+import type { Role } from "./providers/AuthProvider";
 
 export default function App() {
   return (
@@ -23,8 +24,8 @@ export default function App() {
 }
 
 function Shell() {
-  const { user } = useAuth();
-  const appBrand = import.meta.env.VITE_APP_BRAND ?? "Nucleus Console";
+  const { user, phase, login, hasKeycloak } = useAuth();
+  const appBrand = import.meta.env.VITE_APP_BRAND ?? "Jira++ Console";
   const navigationItems = useMemo(() => {
     const base = [{ to: "/", label: "Overview" }];
     if (!user) {
@@ -64,7 +65,17 @@ function Shell() {
             <ThemeToggle />
             {user ? (
               <UserMenu user={user} />
-            ) : null}
+            ) : (
+              <button
+                type="button"
+                onClick={() => void login()}
+                disabled={!hasKeycloak || phase === "checking" || phase === "authenticating"}
+                className="rounded-full border border-slate-200 px-4 py-1.5 text-sm font-medium text-slate-600 transition hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:text-slate-200 dark:hover:bg-slate-800"
+                title={hasKeycloak ? undefined : "Configure VITE_KEYCLOAK_* in your env to enable sign-in"}
+              >
+                {hasKeycloak ? (phase === "checking" || phase === "authenticating" ? "Connecting…" : "Sign in") : "Auth not configured"}
+              </button>
+            )}
           </div>
         </div>
       </header>
@@ -97,17 +108,17 @@ function Shell() {
           <Route
             path="/manager"
             element={
-              <RequireManager>
+              <RequireRole allowedRoles={["ADMIN", "MANAGER"]}>
                 <ManagerPage />
-              </RequireManager>
+              </RequireRole>
             }
           />
           <Route
             path="/admin"
             element={
-              <RequireAdmin>
+              <RequireRole allowedRoles={["ADMIN"]}>
                 <AdminConsolePage />
-              </RequireAdmin>
+              </RequireRole>
             }
           />
           <Route path="*" element={<Navigate to="/" replace />} />
@@ -126,32 +137,167 @@ function linkClass({ isActive }: { isActive: boolean }) {
   );
 }
 
-function RequireManager({ children }: { children: JSX.Element }) {
-  const { user } = useAuth();
-  if (!user) {
-    return <Navigate to="/" replace />;
-  }
-  if (user.role !== "ADMIN" && user.role !== "MANAGER") {
-    return <Navigate to="/" replace />;
-  }
-  return children;
-}
-
-function RequireAdmin({ children }: { children: JSX.Element }) {
-  const { user } = useAuth();
-  if (!user) {
-    return <Navigate to="/" replace />;
-  }
-  if (user.role !== "ADMIN") {
-    return <Navigate to="/" replace />;
-  }
-  return children;
-}
-
 function RequireAuth({ children }: { children: JSX.Element }) {
-  const { user } = useAuth();
-  if (!user) {
+  return <RequireRole allowedRoles={undefined}>{children}</RequireRole>;
+}
+
+function RequireRole({ children, allowedRoles }: { children: JSX.Element; allowedRoles?: Role[] }) {
+  const auth = useAuth();
+  const { brandName } = useBrand();
+  const location = useLocation();
+  const route = location.pathname;
+  const needsRoleCheck = Boolean(allowedRoles?.length);
+  const shouldAuto =
+    auth.hasKeycloak &&
+    auth.phase === "anonymous" &&
+    auth.autoAttempts < auth.maxAutoAttempts &&
+    (!auth.user || (needsRoleCheck && !allowedRoles?.includes(auth.user.role)));
+
+  useAutoLoginGuard({
+    route,
+    shouldAttempt: shouldAuto,
+    phase: auth.phase,
+    autoAttempts: auth.autoAttempts,
+    maxAutoAttempts: auth.maxAutoAttempts,
+    login: auth.login,
+    registerAutoAttempt: auth.registerAutoAttempt,
+  });
+
+  if (auth.phase === "checking" || auth.phase === "authenticating") {
+    return <AuthLoading phase={auth.phase} attempt={auth.autoAttempts} />;
+  }
+
+  if (!auth.user) {
+    return (
+      <ProductAuthGate
+        brandName={brandName}
+        phase={auth.phase}
+        hasKeycloak={auth.hasKeycloak}
+        onSignIn={() => void auth.login()}
+        autoAttempts={auth.autoAttempts}
+        maxAutoAttempts={auth.maxAutoAttempts}
+        error={auth.error}
+      />
+    );
+  }
+
+  if (needsRoleCheck && !allowedRoles?.includes(auth.user.role)) {
     return <Navigate to="/" replace />;
   }
+
   return children;
+}
+
+function ProductAuthGate({
+  brandName,
+  phase,
+  hasKeycloak,
+  onSignIn,
+  autoAttempts,
+  maxAutoAttempts,
+  error,
+}: {
+  brandName: string;
+  phase: string;
+  hasKeycloak: boolean;
+  onSignIn: () => void;
+  autoAttempts: number;
+  maxAutoAttempts: number;
+  error: string | null;
+}) {
+  const attemptsLeft = Math.max(0, maxAutoAttempts - autoAttempts);
+  const showTroubleshooting = phase === "error" || error;
+  return (
+    <div className="mx-auto max-w-2xl rounded-3xl border border-slate-200 bg-white p-10 text-center shadow-lg dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-xs font-semibold uppercase tracking-wide text-slate-500 dark:text-slate-400">{brandName}</p>
+      <h2 className="mt-2 text-3xl font-semibold text-slate-900 dark:text-slate-100">Sign in to continue</h2>
+      <p className="mt-3 text-sm text-slate-500 dark:text-slate-400">
+        Connect through Keycloak so we can load your workspace context.
+      </p>
+      {!hasKeycloak ? (
+        <div className="mt-6 rounded-2xl border border-rose-200 bg-rose-50 p-4 text-left text-sm text-rose-700 dark:border-rose-400/40 dark:bg-rose-400/10 dark:text-rose-200">
+          Missing `VITE_KEYCLOAK_*` env vars. Update your `.env` and restart the dev server.
+        </div>
+      ) : (
+        <button
+          type="button"
+          onClick={onSignIn}
+          disabled={phase === "authenticating"}
+          className="mt-6 inline-flex items-center justify-center rounded-full bg-slate-900 px-6 py-2.5 text-sm font-semibold text-white transition hover:bg-slate-800 dark:bg-slate-50 dark:text-slate-900 dark:hover:bg-slate-200"
+        >
+          {phase === "authenticating" ? "Opening Keycloak…" : "Continue with Keycloak"}
+        </button>
+      )}
+      <p className="mt-4 text-xs text-slate-400 dark:text-slate-500">
+        Auto-login attempts used: {autoAttempts}/{maxAutoAttempts} {attemptsLeft === 0 ? "— click the button above to retry." : null}
+      </p>
+      {showTroubleshooting ? (
+        <div className="mt-6 rounded-2xl border border-slate-200 bg-slate-50 p-4 text-left text-sm dark:border-slate-700 dark:bg-slate-800/60">
+          <p className="font-semibold text-slate-700 dark:text-slate-200">Last authentication error</p>
+          <p className="mt-1 text-slate-500 dark:text-slate-400">{error ?? "Unknown error"}</p>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+function AuthLoading({ phase, attempt }: { phase: string; attempt: number }) {
+  const copy = phase === "authenticating" ? "Opening Keycloak…" : "Checking your session…";
+  return (
+    <div className="mx-auto max-w-xl rounded-3xl border border-slate-200 bg-white p-10 text-center shadow-sm dark:border-slate-800 dark:bg-slate-900">
+      <p className="text-sm text-slate-500 dark:text-slate-400">{copy}</p>
+      {attempt > 0 ? <p className="mt-2 text-xs text-slate-400 dark:text-slate-500">Auto-login attempts: {attempt}</p> : null}
+    </div>
+  );
+}
+
+function useAutoLoginGuard({
+  route,
+  shouldAttempt,
+  phase,
+  autoAttempts,
+  maxAutoAttempts,
+  login,
+  registerAutoAttempt,
+}: {
+  route: string;
+  shouldAttempt: boolean;
+  phase: string;
+  autoAttempts: number;
+  maxAutoAttempts: number;
+  login: () => Promise<void>;
+  registerAutoAttempt: () => void;
+}) {
+  const suppressedRef = useRef(false);
+
+  useEffect(() => {
+    if (!shouldAttempt) {
+      suppressedRef.current = false;
+      return;
+    }
+    if (phase !== "anonymous") {
+      return;
+    }
+    if (autoAttempts >= maxAutoAttempts) {
+      if (!suppressedRef.current) {
+        // eslint-disable-next-line no-console
+        console.info("[AuthLoop] auto login suppressed", { route, autoAttempts });
+        suppressedRef.current = true;
+      }
+      return;
+    }
+    const attemptNumber = autoAttempts + 1;
+    registerAutoAttempt();
+    // eslint-disable-next-line no-console
+    console.info("[AuthLoop] auto login attempt", { attempt: attemptNumber, route });
+    login().catch((error) => {
+      // eslint-disable-next-line no-console
+      console.error("[AuthLoop] auto login failed", error);
+    });
+  }, [autoAttempts, login, maxAutoAttempts, phase, registerAutoAttempt, route, shouldAttempt]);
+}
+
+function useBrand() {
+  const brandName = import.meta.env.VITE_APP_BRAND ?? "Jira++ Console";
+  return { brandName };
 }

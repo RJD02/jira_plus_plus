@@ -7,6 +7,8 @@ import { PreviewPane, PreviewPayload } from "./components/PreviewPane";
 import { MetadataProvider, useMetadataScope } from "./metadata/MetadataContext";
 import { useMetadataCompletions, MetadataMacro } from "./hooks/useMetadataCompletions";
 import { MetadataWorkspace } from "./metadata/MetadataWorkspace";
+import { MetadataAuthBoundary } from "./metadata/MetadataAuthBoundary";
+import { useAuth } from "./auth/AuthProvider";
 import { formatDateTime, formatRelativeTime, formatPreviewValue } from "./lib/format";
 import { fetchMetadataGraphQL } from "./metadata/api";
 import type { CatalogDataset } from "./metadata/types";
@@ -621,12 +623,14 @@ async function fetchGraphQL<T>(
   query: string,
   variables?: Record<string, unknown>,
   signal?: AbortSignal,
+  options?: { token?: string | null },
 ): Promise<T> {
   const response = await fetch("/api/graphql", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
       "x-tenant-id": TENANT_HEADER,
+      ...(options?.token ? { Authorization: `Bearer ${options.token}` } : {}),
     },
     body: JSON.stringify({ query, variables }),
     signal,
@@ -783,12 +787,15 @@ export function App() {
       }),
     [],
   );
+  const auth = useAuth();
   const { metadataClient, metadataClientError } = useMemo(() => {
     try {
+      const headersProvider = () => (auth.token ? { Authorization: `Bearer ${auth.token}` } : undefined);
       return {
         metadataClient: new MetadataClient({
           mode: METADATA_MODE,
           graphqlEndpoint: METADATA_ENDPOINT,
+          headers: headersProvider,
         }),
         metadataClientError: null,
       };
@@ -798,7 +805,16 @@ export function App() {
         metadataClientError: error instanceof Error ? error.message : String(error),
       };
     }
-  }, []);
+  }, [auth.token]);
+  const fetchGraphQLWithAuth = useCallback(
+    async <T,>(query: string, variables?: Record<string, unknown>, signal?: AbortSignal) => {
+      if (!auth.token) {
+        throw new Error("Authentication required");
+      }
+      return fetchGraphQL<T>(query, variables, signal, { token: auth.token });
+    },
+    [auth.token],
+  );
 
   const [health, setHealth] = useState<HealthPayload | null>(null);
   const [definitions, setDefinitions] = useState<DesignerDefinition[]>([]);
@@ -1410,7 +1426,7 @@ export function App() {
     setConversationLoading(true);
     setActionError(null);
     try {
-      const payload = await fetchGraphQL<AgentConversationDetailResponse>(AGENT_CONVERSATION_QUERY, {
+      const payload = await fetchGraphQLWithAuth<AgentConversationDetailResponse>(AGENT_CONVERSATION_QUERY, {
         id: conversationId,
       });
       const detail = payload.agentConversation;
@@ -1526,13 +1542,13 @@ export function App() {
   }, [commandPaletteOpen]);
 
   useEffect(() => {
-    if (!metadataClient) {
+    if (!metadataClient || !auth.user || !auth.token) {
       return;
     }
     const controller = new AbortController();
     const bootstrap = async () => {
       try {
-        const data = await fetchGraphQL<BootstrapResponse>(BOOTSTRAP_QUERY, undefined, controller.signal);
+        const data = await fetchGraphQLWithAuth<BootstrapResponse>(BOOTSTRAP_QUERY, undefined, controller.signal);
         const datasets = await metadataClient.listDatasets();
         if (controller.signal.aborted) {
           return;
@@ -1580,7 +1596,7 @@ export function App() {
 
     void bootstrap();
     return () => controller.abort();
-  }, [loadConversation, metadataClient]);
+  }, [auth.token, auth.user, loadConversation, metadataClient]);
 
   const createSuggestionForPrompt = useCallback(
     (prompt?: string): AgentSuggestion | undefined => {
@@ -1753,7 +1769,7 @@ export function App() {
         .map((value) => value.trim())
         .filter(Boolean);
 
-      const payload = await fetchGraphQL<CreateDefinitionResponse>(CREATE_DEFINITION_MUTATION, {
+      const payload = await fetchGraphQLWithAuth<CreateDefinitionResponse>(CREATE_DEFINITION_MUTATION, {
         input: {
           name: newDefinitionForm.name.trim(),
           slug: newDefinitionForm.slug.trim() || undefined,
@@ -1797,7 +1813,7 @@ export function App() {
           ? JSON.parse(versionForm.defaultFilters)
           : undefined;
 
-      const payload = await fetchGraphQL<CreateVersionResponse>(CREATE_VERSION_MUTATION, {
+      const payload = await fetchGraphQLWithAuth<CreateVersionResponse>(CREATE_VERSION_MUTATION, {
         input: {
           definitionId: selectedDefinitionId,
           status: "DRAFT",
@@ -1842,7 +1858,7 @@ export function App() {
     setPublishing(true);
     setActionError(null);
     try {
-      const payload = await fetchGraphQL<PublishVersionResponse>(PUBLISH_VERSION_MUTATION, {
+      const payload = await fetchGraphQLWithAuth<PublishVersionResponse>(PUBLISH_VERSION_MUTATION, {
         id: selectedVersionId,
       });
       const updatedDefinition = payload.publishReportVersion;
@@ -1909,7 +1925,7 @@ export function App() {
     setAgentProcessing(true);
     setActionError(null);
     try {
-      await fetchGraphQL<AgentDesignResponse>(AGENT_DESIGN_MUTATION, {
+      await fetchGraphQLWithAuth<AgentDesignResponse>(AGENT_DESIGN_MUTATION, {
         input: {
           prompt: content,
           datasetIds: resolvedAgentDatasetIds.length > 0 ? resolvedAgentDatasetIds : undefined,
@@ -2024,7 +2040,7 @@ export function App() {
     setActionError(null);
     try {
       const personaInput = newConversationPersona.trim();
-      const payload = await fetchGraphQL<StartConversationResponse>(START_CONVERSATION_MUTATION, {
+      const payload = await fetchGraphQLWithAuth<StartConversationResponse>(START_CONVERSATION_MUTATION, {
         input: personaInput ? { persona: personaInput } : undefined,
       });
       const reflectionId = payload.startAgentConversation.reflectionId;
@@ -2078,7 +2094,7 @@ export function App() {
         : null;
 
       if (!dashboardId) {
-        const payload = await fetchGraphQL<CreateDashboardResponse>(CREATE_DASHBOARD_MUTATION, {
+        const payload = await fetchGraphQLWithAuth<CreateDashboardResponse>(CREATE_DASHBOARD_MUTATION, {
           input: {
             name: dashboardName.trim(),
             description: dashboardDescription.trim() || undefined,
@@ -2101,7 +2117,7 @@ export function App() {
         })),
       };
 
-      const versionPayload = await fetchGraphQL<CreateDashboardVersionResponse>(
+      const versionPayload = await fetchGraphQLWithAuth<CreateDashboardVersionResponse>(
         CREATE_DASHBOARD_VERSION_MUTATION,
         {
           input: {
@@ -2119,7 +2135,7 @@ export function App() {
           const definition = definitions.find((entry) => entry.id === tile.definitionId) ?? null;
           const resolvedVersionId = resolveDraftVersion(tile, definition) ?? undefined;
           const overrides = tileOverridesFromDraft(tile);
-          return fetchGraphQL<AddDashboardTileResponse>(ADD_DASHBOARD_TILE_MUTATION, {
+          return fetchGraphQLWithAuth<AddDashboardTileResponse>(ADD_DASHBOARD_TILE_MUTATION, {
             input: {
               dashboardVersionId: dashboardVersion.id,
               reportDefinitionId: tile.definitionId,
@@ -2141,13 +2157,13 @@ export function App() {
       let updatedDashboard: DashboardDefinition;
 
       if (options.publish) {
-        const publishPayload = await fetchGraphQL<PublishDashboardVersionResponse>(
+        const publishPayload = await fetchGraphQLWithAuth<PublishDashboardVersionResponse>(
           PUBLISH_DASHBOARD_VERSION_MUTATION,
           { id: dashboardVersion.id },
         );
         updatedDashboard = publishPayload.publishDashboardVersion;
       } else {
-        const versionData = await fetchGraphQL<DashboardVersionResponse>(DASHBOARD_VERSION_QUERY, {
+        const versionData = await fetchGraphQLWithAuth<DashboardVersionResponse>(DASHBOARD_VERSION_QUERY, {
           id: dashboardVersion.id,
         });
         const hydratedVersion =
@@ -2246,6 +2262,18 @@ export function App() {
     { id: "ingestion", icon: "⚡", label: "Ingestion", active: false, disabled: true },
     { id: "recon", icon: "🛰", label: "Recon", active: false, disabled: true },
   ];
+
+  const userInitials = useMemo(() => {
+    if (!auth.user) {
+      return "??";
+    }
+    return auth.user.displayName
+      .split(" ")
+      .map((part) => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
+  }, [auth.user]);
 
   const renderPrimaryNav = () => {
     const widthClass = navExpanded ? "w-64" : "w-20";
@@ -2348,6 +2376,34 @@ export function App() {
           >
             {navExpanded ? <LuPanelLeftClose className="h-4 w-4" /> : <LuPanelLeftOpen className="h-4 w-4" />}
           </button>
+          {auth.user ? (
+            navExpanded ? (
+              <div className="w-full space-y-2 border-t border-white/10 pt-4" data-testid="metadata-user-chip">
+                <p className="text-sm font-semibold text-white">{auth.user.displayName}</p>
+                <p className="text-xs text-slate-400">{auth.user.email}</p>
+                <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500" data-testid="metadata-user-role">
+                  {auth.user.role}
+                </p>
+                <button
+                  type="button"
+                  onClick={() => void auth.logout()}
+                  className="w-full rounded-2xl border border-white/20 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-100 transition hover:border-white/40"
+                  data-testid="metadata-logout-button"
+                >
+                  Sign out
+                </button>
+              </div>
+            ) : (
+              <button
+                type="button"
+                className="flex h-10 w-10 items-center justify-center rounded-full border border-white/40 text-sm font-semibold text-white"
+                onClick={() => void auth.logout()}
+                title={`${auth.user.displayName} — Sign out`}
+              >
+                {userInitials}
+              </button>
+            )
+          ) : null}
         </div>
       </nav>
     );
@@ -3035,6 +3091,7 @@ const renderManualEditor = () => {
       catalogDatasets={catalogDatasets}
       selectedDatasetIds={selectedDatasetIds}
       toggleDatasetSelection={toggleDatasetSelection}
+      authToken={auth.token}
     />
   );
 
@@ -3899,7 +3956,7 @@ const renderManualEditor = () => {
     }),
     [selectedDatasetIds, toggleDatasetSelection],
   );
-  return (
+  const appContent = (
     <MetadataProvider datasets={catalogDatasets} definitions={metadataDefinitions} dashboards={metadataDashboards} persona={metadataPersona} scope={metadataScopeValue}>
       <main className="flex h-screen overflow-hidden bg-slate-100 text-slate-900 dark:bg-slate-900 dark:text-slate-100">
         {renderPrimaryNav()}
@@ -3935,6 +3992,8 @@ const renderManualEditor = () => {
       {renderCommandPalette()}
     </MetadataProvider>
   );
+
+  return <MetadataAuthBoundary>{appContent}</MetadataAuthBoundary>;
 }
 
 export default App;

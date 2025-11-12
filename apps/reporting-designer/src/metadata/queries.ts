@@ -14,6 +14,8 @@ export const METADATA_OVERVIEW_QUERY = `
       detectedVersion
       versionHint
       capabilities
+      deletedAt
+      deletionReason
       runs(limit: 5) {
         id
         status
@@ -118,6 +120,16 @@ export const TEST_METADATA_ENDPOINT_MUTATION = `
       detectedVersion
       capabilities
       details
+    }
+  }
+`;
+
+export const DELETE_METADATA_ENDPOINT_MUTATION = `
+  mutation DesignerDeleteMetadataEndpoint($id: ID!, $reason: String) {
+    deleteMetadataEndpoint(id: $id, reason: $reason) {
+      id
+      deletedAt
+      deletionReason
     }
   }
 `;

@@ -1,6 +1,7 @@
 # Node.js
 node_modules
 dist
+.playwright/
 .nucleus/
 packages/cdm/generated
 packages/cdm/node_modules
@@ -31,3 +32,5 @@ apps/jira-plus-plus/src/components/**/__generated__
 apps/jira-plus-plus/src/graphql/__generated__
 apps/api/src/generated
 **/__pycache__
+test-results/
+.cache/

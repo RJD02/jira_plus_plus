@@ -1,0 +1,99 @@
+{
+  "realm": "nucleus",
+  "enabled": true,
+  "displayName": "Nucleus Local",
+  "roles": {
+    "realm": [
+      { "name": "reader", "description": "Read-only access" },
+      { "name": "writer", "description": "Read/write access" },
+      { "name": "admin", "description": "Administrative operator" }
+    ]
+  },
+  "clientScopes": [
+    {
+      "name": "nucleus-context",
+      "protocol": "openid-connect",
+      "protocolMappers": [
+        {
+          "name": "tenant-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "consentRequired": false,
+          "config": {
+            "user.attribute": "tenant_id",
+            "claim.name": "tenant_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "project-id",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-attribute-mapper",
+          "config": {
+            "user.attribute": "project_id",
+            "claim.name": "project_id",
+            "jsonType.label": "String",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        },
+        {
+          "name": "realm-roles",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-usermodel-realm-role-mapper",
+          "config": {
+            "claim.name": "roles",
+            "jsonType.label": "String",
+            "multivalued": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "true"
+          }
+        }
+      ]
+    }
+  ],
+  "clients": [
+    {
+      "clientId": "jira-plus-plus",
+      "name": "Jira++",
+      "enabled": true,
+      "protocol": "openid-connect",
+      "publicClient": true,
+      "fullScopeAllowed": false,
+      "standardFlowEnabled": true,
+      "directAccessGrantsEnabled": true,
+      "serviceAccountsEnabled": true,
+      "redirectUris": ["*"] ,
+      "webOrigins": ["*"] ,
+      "defaultClientScopes": ["profile", "email", "roles", "nucleus-context"],
+      "optionalClientScopes": ["address", "phone"],
+      "attributes": {
+        "post.logout.redirect.uris": "*"
+      }
+    }
+  ],
+  "users": [
+    {
+      "username": "dev-writer",
+      "enabled": true,
+      "emailVerified": true,
+      "email": "dev-writer@example.com",
+      "firstName": "Dev",
+      "lastName": "Writer",
+      "credentials": [
+        {
+          "type": "password",
+          "value": "password",
+          "temporary": false
+        }
+      ],
+      "realmRoles": ["writer"],
+      "attributes": {
+        "tenant_id": ["dev"],
+        "project_id": ["global"]
+      }
+    }
+  ]
+}

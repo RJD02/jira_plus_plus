@@ -1,11 +1,10 @@
 import { ArrowRight, ShieldCheck, Sparkles, Workflow } from "lucide-react";
 import { Link } from "react-router-dom";
-import { LoginCard } from "../components/auth/LoginCard";
 import type { ReactNode } from "react";
 import { useAuth } from "../providers/AuthProvider";
 
 export function HomePage() {
-  const { user } = useAuth();
+  const { user, login, phase, hasKeycloak } = useAuth();
   return (
     <div className="space-y-16">
       <section className="relative overflow-hidden rounded-3xl border border-slate-200 bg-white/95 p-10 shadow-2xl shadow-slate-200/70 dark:border-slate-800 dark:bg-slate-950/80 dark:shadow-slate-950/60">
@@ -54,7 +53,15 @@ export function HomePage() {
               </Link>
             </div>
           </div>
-          {user ? null : <LoginCard />}
+          {user ? (
+            <SignedInCard name={user.displayName} email={user.email} />
+          ) : (
+            <SignInCard
+              phase={phase}
+              canSignIn={hasKeycloak}
+              onSignIn={() => void login()}
+            />
+          )}
         </div>
       </section>
       <section className="grid gap-6 rounded-3xl border border-slate-200 bg-white/90 p-8 shadow-lg shadow-slate-200/50 dark:border-slate-800 dark:bg-slate-900/60 dark:shadow-slate-950/50">
@@ -115,3 +122,51 @@ const highlights = [
       "Associate Jira account IDs with your Jira++ workspace to unlock cross-project analytics and coaching insights.",
   },
 ];
+
+function SignInCard({
+  onSignIn,
+  phase,
+  canSignIn,
+}: {
+  onSignIn: () => void;
+  phase: string;
+  canSignIn: boolean;
+}) {
+  return (
+    <div className="flex h-full flex-col justify-between rounded-3xl border border-slate-200 bg-slate-900/90 p-8 text-white shadow-2xl shadow-slate-900/40 dark:border-slate-800 dark:bg-slate-800/80">
+      <div className="space-y-3">
+        <p className="text-sm font-semibold uppercase tracking-wide text-slate-300">Get started</p>
+        <h3 className="text-2xl font-semibold">Sign in to connect your Jira sources</h3>
+        <p className="text-sm text-slate-200">
+          Keycloak handles authentication so every request carries tenant and project context automatically.
+        </p>
+        {!canSignIn ? (
+          <p className="text-xs text-rose-200">
+            Missing `VITE_KEYCLOAK_*` env vars. Update your `.env` and restart the dev server to enable sign-in.
+          </p>
+        ) : null}
+      </div>
+      <button
+        type="button"
+        onClick={onSignIn}
+        disabled={!canSignIn || phase === "checking" || phase === "authenticating"}
+        className="mt-10 inline-flex items-center justify-center rounded-full bg-white/95 px-5 py-2 text-sm font-semibold text-slate-900 transition hover:bg-white disabled:cursor-not-allowed disabled:opacity-70"
+      >
+        {phase === "checking" || phase === "authenticating" ? "Connecting…" : canSignIn ? "Sign in with Keycloak" : "Configure auth to continue"}
+      </button>
+    </div>
+  );
+}
+
+function SignedInCard({ name, email }: { name: string; email: string }) {
+  return (
+    <div className="rounded-3xl border border-emerald-200 bg-emerald-50/80 p-8 shadow-inner shadow-emerald-200/60 dark:border-emerald-500/40 dark:bg-emerald-900/20">
+      <p className="text-xs font-semibold uppercase tracking-wide text-emerald-600 dark:text-emerald-300">Signed in</p>
+      <h3 className="mt-2 text-2xl font-semibold text-emerald-800 dark:text-emerald-100">{name}</h3>
+      <p className="text-sm text-emerald-700 dark:text-emerald-200">{email}</p>
+      <p className="mt-4 text-sm text-emerald-700/80 dark:text-emerald-200/80">
+        You can jump directly into the console modules without re-authenticating. Tokens refresh automatically while this tab remains open.
+      </p>
+    </div>
+  );
+}

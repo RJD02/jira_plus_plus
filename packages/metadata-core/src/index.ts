@@ -1,5 +1,14 @@
-import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink } from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
+import { createHash, randomUUID as nodeRandomUUID } from "node:crypto";
+import {
+  S3Client,
+  PutObjectCommand,
+  GetObjectCommand,
+  DeleteObjectCommand,
+} from "@aws-sdk/client-s3";
+import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export type MetadataLabel = string;
 
@@ -13,7 +22,8 @@ export type MetadataEndpointFieldValueType =
   | "PORT"
   | "JSON"
   | "ENUM"
-  | "LIST";
+  | "LIST"
+  | "TEXT";
 
 export type MetadataEndpointFieldSemantic =
   | "HOST"
@@ -103,6 +113,8 @@ export type MetadataEndpointDescriptor = {
   capabilities?: string[];
   createdAt?: string;
   updatedAt?: string;
+  deletedAt?: string | null;
+  deletionReason?: string | null;
 };
 
 export type HttpVerb = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -135,6 +147,102 @@ export type RecordFilter = {
   limit?: number;
 };
 
+export type TenantContext = {
+  tenantId: string;
+  projectId: string;
+  actorId?: string;
+};
+
+export type GraphEntityInput = {
+  id?: string;
+  entityType: string;
+  displayName: string;
+  canonicalPath?: string;
+  sourceSystem?: string;
+  specRef?: string;
+  properties?: Record<string, unknown>;
+};
+
+export type GraphEntity = GraphEntityInput & {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  version: number;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GraphEntityFilter = {
+  entityTypes?: string[];
+  search?: string;
+  limit?: number;
+};
+
+export type GraphEdgeInput = {
+  id?: string;
+  edgeType: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  confidence?: number;
+  specRef?: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type GraphEdge = GraphEdgeInput & {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type GraphEdgeFilter = {
+  edgeTypes?: string[];
+  sourceEntityId?: string;
+  targetEntityId?: string;
+  limit?: number;
+};
+
+export type GraphStoreCapabilities = {
+  vectorSearch: boolean;
+  pathQueries: boolean;
+  annotations: boolean;
+};
+
+export type GraphEmbeddingInput = {
+  entityId: string;
+  vector: number[];
+  modelId: string;
+  metadata?: Record<string, unknown>;
+};
+
+export type GraphEmbedding = GraphEmbeddingInput & {
+  id: string;
+  tenantId: string;
+  projectId: string;
+  hash: string;
+  createdAt: string;
+};
+
+export interface GraphStore {
+  capabilities(): Promise<GraphStoreCapabilities>;
+  upsertEntity(input: GraphEntityInput, context: TenantContext): Promise<GraphEntity>;
+  getEntity(id: string, context: TenantContext): Promise<GraphEntity | null>;
+  listEntities(filter: GraphEntityFilter | undefined, context: TenantContext): Promise<GraphEntity[]>;
+  upsertEdge(input: GraphEdgeInput, context: TenantContext): Promise<GraphEdge>;
+  listEdges(filter: GraphEdgeFilter | undefined, context: TenantContext): Promise<GraphEdge[]>;
+  putEmbedding(input: GraphEmbeddingInput, context: TenantContext): Promise<GraphEmbedding>;
+  searchEmbeddings(
+    query: { vector: number[]; limit?: number; modelId?: string },
+    context: TenantContext,
+  ): Promise<GraphEmbedding[]>;
+}
+
+export type GraphStoreFactoryOptions = {
+  driver?: string;
+  metadataStore: MetadataStore;
+};
+
 export interface MetadataStore {
   listRecords<T = Record<string, unknown>>(domain: string, filter?: RecordFilter): Promise<MetadataRecord<T>[]>;
   getRecord<T = Record<string, unknown>>(domain: string, id: string): Promise<MetadataRecord<T> | null>;
@@ -153,6 +261,10 @@ export type FileMetadataStoreOptions = {
 const DEFAULT_DATA_DIR = path.resolve(process.cwd(), "metadata", "store");
 const RECORDS_FILE = "records.json";
 const ENDPOINTS_FILE = "endpoints.json";
+const DEFAULT_OBJECT_STORE_DIR = path.resolve(process.cwd(), "metadata", "objects");
+const DEFAULT_KV_STORE_FILE = path.resolve(process.cwd(), "metadata", "kv-store.json");
+const DEFAULT_JSON_STORE_DIR = path.resolve(process.cwd(), "metadata", "json");
+const DEFAULT_CODE_STORE_DIR = path.resolve(process.cwd(), "metadata", "code");
 
 export class FileMetadataStore implements MetadataStore {
   private readonly rootDir: string;
@@ -254,13 +366,15 @@ export class FileMetadataStore implements MetadataStore {
     const existingIndex = endpoints.findIndex((entry) => entry.id === endpoint.id);
     const now = new Date().toISOString();
     if (existingIndex >= 0) {
-      const existingSourceId = endpoints[existingIndex].sourceId;
+      const existing = endpoints[existingIndex];
       const updated: MetadataEndpointDescriptor = {
-        ...endpoints[existingIndex],
+        ...existing,
         ...endpoint,
-        sourceId: endpoint.sourceId ?? existingSourceId ?? generateSourceId(endpoint),
-        createdAt: endpoints[existingIndex].createdAt ?? endpoint.createdAt ?? now,
+        sourceId: endpoint.sourceId ?? existing.sourceId ?? generateSourceId(endpoint),
+        createdAt: existing.createdAt ?? endpoint.createdAt ?? now,
         updatedAt: now,
+        deletedAt: endpoint.deletedAt ?? existing.deletedAt ?? null,
+        deletionReason: endpoint.deletionReason ?? existing.deletionReason ?? null,
       };
       endpoints[existingIndex] = updated;
       await this.persistEndpoints(endpoints);
@@ -272,6 +386,8 @@ export class FileMetadataStore implements MetadataStore {
       sourceId: endpoint.sourceId ?? generateSourceId(endpoint),
       createdAt: endpoint.createdAt ?? now,
       updatedAt: endpoint.updatedAt ?? now,
+      deletedAt: endpoint.deletedAt ?? null,
+      deletionReason: endpoint.deletionReason ?? null,
     };
     endpoints.push(descriptor);
     await this.persistEndpoints(endpoints);
@@ -551,7 +667,11 @@ function mapPrismaEndpoint(endpoint: any): MetadataEndpointDescriptor {
 }
 
 function cryptoRandomId(): string {
-  return Math.random().toString(36).slice(2, 10);
+  try {
+    return nodeRandomUUID().replace(/-/g, "");
+  } catch {
+    return Math.random().toString(36).slice(2, 10);
+  }
 }
 
 function generateSourceId(endpoint: MetadataEndpointDescriptor): string {
@@ -580,10 +700,686 @@ async function ensureDir(dir: string): Promise<void> {
   }
 }
 
+async function ensureParentDir(filePath: string): Promise<void> {
+  await mkdir(path.dirname(filePath), { recursive: true });
+}
+
 function isENOENT(error: unknown): boolean {
   return Boolean((error as NodeJS.ErrnoException)?.code === "ENOENT");
 }
 
 function isEEXIST(error: unknown): boolean {
   return Boolean((error as NodeJS.ErrnoException)?.code === "EEXIST");
+}
+
+type GraphEntityRecordPayload = {
+  tenantId: string;
+  entityType: string;
+  displayName: string;
+  canonicalPath?: string;
+  sourceSystem?: string;
+  specRef?: string;
+  properties?: Record<string, unknown>;
+  version: number;
+  projectId: string;
+};
+
+type GraphEdgeRecordPayload = {
+  tenantId: string;
+  edgeType: string;
+  sourceEntityId: string;
+  targetEntityId: string;
+  confidence?: number;
+  specRef?: string;
+  metadata?: Record<string, unknown>;
+  projectId: string;
+};
+
+type GraphEmbeddingRecordPayload = {
+  tenantId: string;
+  projectId: string;
+  entityId: string;
+  modelId: string;
+  vector: number[];
+  hash: string;
+  metadata?: Record<string, unknown>;
+};
+
+const GRAPH_ENTITY_DOMAIN = "graph.entity";
+const GRAPH_EDGE_DOMAIN = "graph.edge";
+const GRAPH_EMBEDDING_DOMAIN = "graph.embedding";
+
+class MetadataGraphStore implements GraphStore {
+  constructor(private readonly store: MetadataStore) {}
+
+  async capabilities(): Promise<GraphStoreCapabilities> {
+    return {
+      vectorSearch: true,
+      pathQueries: false,
+      annotations: true,
+    };
+  }
+
+  async upsertEntity(input: GraphEntityInput, context: TenantContext): Promise<GraphEntity> {
+    const existing = input.id
+      ? await this.store.getRecord<GraphEntityRecordPayload>(GRAPH_ENTITY_DOMAIN, input.id)
+      : null;
+    const nextVersion = existing ? (existing.payload?.version ?? 0) + 1 : 1;
+    const record = await this.store.upsertRecord<GraphEntityRecordPayload>({
+      id: input.id,
+      projectId: context.projectId,
+      domain: GRAPH_ENTITY_DOMAIN,
+      labels: [context.tenantId, input.entityType],
+      payload: {
+        tenantId: context.tenantId,
+        entityType: input.entityType,
+        displayName: input.displayName,
+        canonicalPath: input.canonicalPath,
+        sourceSystem: input.sourceSystem,
+        specRef: input.specRef,
+        properties: input.properties ?? {},
+        version: nextVersion,
+        projectId: context.projectId,
+      },
+    });
+    return mapRecordToGraphEntity(record);
+  }
+
+  async getEntity(id: string, context: TenantContext): Promise<GraphEntity | null> {
+    const record = await this.store.getRecord<GraphEntityRecordPayload>(GRAPH_ENTITY_DOMAIN, id);
+    if (!record || record.projectId !== context.projectId) {
+      return null;
+    }
+    return mapRecordToGraphEntity(record);
+  }
+
+  async listEntities(filter: GraphEntityFilter | undefined, context: TenantContext): Promise<GraphEntity[]> {
+    const records = await this.store.listRecords<GraphEntityRecordPayload>(GRAPH_ENTITY_DOMAIN, {
+      projectId: context.projectId,
+      limit: filter?.limit,
+    });
+    return records
+      .filter((record) => (filter?.entityTypes?.length ? filter.entityTypes.includes(record.payload.entityType) : true))
+      .filter((record) => {
+        if (!filter?.search) {
+          return true;
+        }
+        const haystack = `${record.payload.displayName} ${record.payload.canonicalPath ?? ""} ${JSON.stringify(
+          record.payload.properties ?? {},
+        )}`.toLowerCase();
+        return haystack.includes(filter.search.toLowerCase());
+      })
+      .map(mapRecordToGraphEntity);
+  }
+
+  async upsertEdge(input: GraphEdgeInput, context: TenantContext): Promise<GraphEdge> {
+    const record = await this.store.upsertRecord<GraphEdgeRecordPayload>({
+      id: input.id,
+      projectId: context.projectId,
+      domain: GRAPH_EDGE_DOMAIN,
+      labels: [context.tenantId, input.edgeType],
+      payload: {
+        tenantId: context.tenantId,
+        edgeType: input.edgeType,
+        sourceEntityId: input.sourceEntityId,
+        targetEntityId: input.targetEntityId,
+        confidence: input.confidence,
+        specRef: input.specRef,
+        metadata: input.metadata ?? {},
+        projectId: context.projectId,
+      },
+    });
+    return mapRecordToGraphEdge(record);
+  }
+
+  async listEdges(filter: GraphEdgeFilter | undefined, context: TenantContext): Promise<GraphEdge[]> {
+    const records = await this.store.listRecords<GraphEdgeRecordPayload>(GRAPH_EDGE_DOMAIN, {
+      projectId: context.projectId,
+      limit: filter?.limit,
+    });
+    return records
+      .filter((record) => (filter?.edgeTypes?.length ? filter.edgeTypes.includes(record.payload.edgeType) : true))
+      .filter((record) => {
+        if (filter?.sourceEntityId && record.payload.sourceEntityId !== filter.sourceEntityId) {
+          return false;
+        }
+        if (filter?.targetEntityId && record.payload.targetEntityId !== filter.targetEntityId) {
+          return false;
+        }
+        return true;
+      })
+      .map(mapRecordToGraphEdge);
+  }
+
+  async putEmbedding(input: GraphEmbeddingInput, context: TenantContext): Promise<GraphEmbedding> {
+    const hash = hashVector(input.vector);
+    const record = await this.store.upsertRecord<GraphEmbeddingRecordPayload>({
+      id: `${input.entityId}-${hash}`,
+      projectId: context.projectId,
+      domain: GRAPH_EMBEDDING_DOMAIN,
+      labels: [context.tenantId, input.modelId],
+      payload: {
+        tenantId: context.tenantId,
+        projectId: context.projectId,
+        entityId: input.entityId,
+        modelId: input.modelId,
+        vector: input.vector,
+        hash,
+        metadata: input.metadata ?? {},
+      },
+    });
+    return mapRecordToGraphEmbedding(record);
+  }
+
+  async searchEmbeddings(
+    query: { vector: number[]; limit?: number; modelId?: string },
+    context: TenantContext,
+  ): Promise<GraphEmbedding[]> {
+    const records = await this.store.listRecords<GraphEmbeddingRecordPayload>(GRAPH_EMBEDDING_DOMAIN, {
+      projectId: context.projectId,
+    });
+    const scored = records
+      .filter((record) => (query.modelId ? record.payload.modelId === query.modelId : true))
+      .map((record) => {
+        const similarity = cosineSimilarity(query.vector, record.payload.vector);
+        return { record, similarity };
+      })
+      .sort((a, b) => b.similarity - a.similarity)
+      .slice(0, query.limit ?? 10);
+    return scored.map((entry) => mapRecordToGraphEmbedding(entry.record));
+  }
+}
+
+function mapRecordToGraphEntity(record: MetadataRecord<GraphEntityRecordPayload>): GraphEntity {
+  return {
+    id: record.id,
+    tenantId: record.payload.tenantId,
+    projectId: record.projectId,
+    entityType: record.payload.entityType,
+    displayName: record.payload.displayName,
+    canonicalPath: record.payload.canonicalPath,
+    sourceSystem: record.payload.sourceSystem,
+    specRef: record.payload.specRef,
+    properties: record.payload.properties ?? {},
+    version: record.payload.version ?? 1,
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function mapRecordToGraphEdge(record: MetadataRecord<GraphEdgeRecordPayload>): GraphEdge {
+  return {
+    id: record.id,
+    tenantId: record.payload.tenantId,
+    projectId: record.projectId,
+    edgeType: record.payload.edgeType,
+    sourceEntityId: record.payload.sourceEntityId,
+    targetEntityId: record.payload.targetEntityId,
+    confidence: record.payload.confidence,
+    specRef: record.payload.specRef,
+    metadata: record.payload.metadata ?? {},
+    createdAt: record.createdAt,
+    updatedAt: record.updatedAt,
+  };
+}
+
+function mapRecordToGraphEmbedding(record: MetadataRecord<GraphEmbeddingRecordPayload>): GraphEmbedding {
+  return {
+    id: record.id,
+    tenantId: record.payload.tenantId,
+    projectId: record.projectId,
+    entityId: record.payload.entityId,
+    modelId: record.payload.modelId,
+    vector: record.payload.vector,
+    hash: record.payload.hash,
+    metadata: record.payload.metadata ?? {},
+    createdAt: record.createdAt,
+  };
+}
+
+export function createGraphStore(options: GraphStoreFactoryOptions): GraphStore {
+  const driver = (options.driver ?? "metadata").toLowerCase();
+  switch (driver) {
+    case "metadata":
+    case "postgres":
+      return new MetadataGraphStore(options.metadataStore);
+    default:
+      throw new Error(`Unsupported graph store driver: ${driver}`);
+  }
+}
+
+export interface ObjectStore {
+  putObject(key: string, body: Buffer | Uint8Array | string): Promise<void>;
+  getObject(key: string): Promise<Buffer | null>;
+  deleteObject(key: string): Promise<void>;
+  generatePresignedUrl?(key: string, options?: { expiresInSeconds?: number }): Promise<string>;
+}
+
+export type ObjectStoreFactoryOptions = {
+  driver?: string;
+  rootDir?: string;
+  bucket?: string;
+  endpoint?: string;
+  region?: string;
+  accessKeyId?: string;
+  secretAccessKey?: string;
+  forcePathStyle?: boolean;
+};
+
+class FileObjectStore implements ObjectStore {
+  constructor(private readonly rootDir: string) {}
+
+  async putObject(key: string, body: Buffer | Uint8Array | string): Promise<void> {
+    const resolved = this.resolvePath(key);
+    await ensureParentDir(resolved);
+    const data = typeof body === "string" ? body : Buffer.from(body);
+    await writeFile(resolved, data);
+  }
+
+  async getObject(key: string): Promise<Buffer | null> {
+    try {
+      const resolved = this.resolvePath(key);
+      const data = await readFile(resolved);
+      return data;
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    try {
+      await unlink(this.resolvePath(key));
+    } catch {
+      // ignore
+    }
+  }
+
+  async generatePresignedUrl(key: string): Promise<string> {
+    const resolved = this.resolvePath(key);
+    return pathToFileURL(resolved).toString();
+  }
+
+  private resolvePath(key: string): string {
+    const normalized = key.replace(/^\/+/, "");
+    return path.resolve(this.rootDir, normalized);
+  }
+}
+
+class S3ObjectStore implements ObjectStore {
+  constructor(private readonly client: S3Client, private readonly bucket: string) {}
+
+  async putObject(key: string, body: Buffer | Uint8Array | string): Promise<void> {
+    const payload = typeof body === "string" ? Buffer.from(body) : Buffer.isBuffer(body) ? body : Buffer.from(body);
+    await this.client.send(
+      new PutObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+        Body: payload,
+      }),
+    );
+  }
+
+  async getObject(key: string): Promise<Buffer | null> {
+    try {
+      const response = await this.client.send(
+        new GetObjectCommand({
+          Bucket: this.bucket,
+          Key: key,
+        }),
+      );
+      if (!response.Body) {
+        return null;
+      }
+      const chunks: Uint8Array[] = [];
+      const stream = response.Body as NodeJS.ReadableStream;
+      for await (const chunk of stream) {
+        chunks.push(typeof chunk === "string" ? Buffer.from(chunk) : chunk);
+      }
+      return Buffer.concat(chunks);
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteObject(key: string): Promise<void> {
+    await this.client.send(
+      new DeleteObjectCommand({
+        Bucket: this.bucket,
+        Key: key,
+      }),
+    );
+  }
+
+  async generatePresignedUrl(key: string, options?: { expiresInSeconds?: number }): Promise<string> {
+    const command = new GetObjectCommand({
+      Bucket: this.bucket,
+      Key: key,
+    });
+    return getSignedUrl(this.client, command, { expiresIn: options?.expiresInSeconds ?? 300 });
+  }
+}
+
+export function createObjectStore(options?: ObjectStoreFactoryOptions): ObjectStore {
+  const driver = (options?.driver ?? process.env.OBJECT_STORE_DRIVER ?? "file").toLowerCase();
+  switch (driver) {
+    case "file":
+      return new FileObjectStore(options?.rootDir ?? process.env.OBJECT_STORE_ROOT ?? DEFAULT_OBJECT_STORE_DIR);
+    case "s3": {
+      const bucket = options?.bucket ?? process.env.OBJECT_STORE_BUCKET;
+      if (!bucket) {
+        throw new Error("OBJECT_STORE_BUCKET is required for s3 driver");
+      }
+      const endpoint = options?.endpoint ?? process.env.OBJECT_STORE_ENDPOINT;
+      const region = options?.region ?? process.env.OBJECT_STORE_REGION ?? "us-east-1";
+      const accessKeyId = options?.accessKeyId ?? process.env.OBJECT_STORE_ACCESS_KEY;
+      const secretAccessKey = options?.secretAccessKey ?? process.env.OBJECT_STORE_SECRET_KEY;
+      if (!accessKeyId || !secretAccessKey) {
+        throw new Error("OBJECT_STORE_ACCESS_KEY and OBJECT_STORE_SECRET_KEY are required for s3 driver");
+      }
+      const forcePathStyle =
+        options?.forcePathStyle ??
+        (process.env.OBJECT_STORE_FORCE_PATH_STYLE ? process.env.OBJECT_STORE_FORCE_PATH_STYLE === "true" : true);
+      const client = new S3Client({
+        region,
+        endpoint,
+        forcePathStyle,
+        credentials: {
+          accessKeyId,
+          secretAccessKey,
+        },
+      });
+      return new S3ObjectStore(client, bucket);
+    }
+    default:
+      throw new Error(`Unsupported object store driver: ${driver}`);
+  }
+}
+
+export interface KeyValueStore {
+  get<T = unknown>(key: string): Promise<{ value: T | null; version: string | null }>;
+  put<T = unknown>(key: string, value: T, options?: { expectedVersion?: string | null }): Promise<string>;
+  delete(key: string, options?: { expectedVersion?: string | null }): Promise<void>;
+}
+
+type KeyValueStoreFactoryOptions = {
+  driver?: string;
+  filePath?: string;
+};
+
+type FileKeyValueEntry = {
+  value: unknown;
+  version: string;
+  updatedAt: string;
+};
+
+class FileKeyValueStore implements KeyValueStore {
+  constructor(private readonly filePath: string) {}
+
+  async get<T = unknown>(key: string): Promise<{ value: T | null; version: string | null }> {
+    const store = await this.load();
+    const entry = store[key];
+    if (!entry) {
+      return { value: null, version: null };
+    }
+    return {
+      value: entry.value as T,
+      version: entry.version,
+    };
+  }
+
+  async put<T = unknown>(key: string, value: T, options?: { expectedVersion?: string | null }): Promise<string> {
+    const store = await this.load();
+    const current = store[key];
+    if (options?.expectedVersion && current?.version !== options.expectedVersion) {
+      throw new Error("CAS mismatch");
+    }
+    const version = cryptoRandomId();
+    store[key] = {
+      value,
+      version,
+      updatedAt: new Date().toISOString(),
+    };
+    await this.persist(store);
+    return version;
+  }
+
+  async delete(key: string, options?: { expectedVersion?: string | null }): Promise<void> {
+    const store = await this.load();
+    const current = store[key];
+    if (!current) {
+      return;
+    }
+    if (options?.expectedVersion && current.version !== options.expectedVersion) {
+      throw new Error("CAS mismatch");
+    }
+    delete store[key];
+    await this.persist(store);
+  }
+
+  private async load(): Promise<Record<string, FileKeyValueEntry>> {
+    try {
+      const raw = await readFile(this.filePath, "utf-8");
+      const parsed = JSON.parse(raw);
+      return typeof parsed === "object" && parsed ? (parsed as Record<string, FileKeyValueEntry>) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private async persist(store: Record<string, FileKeyValueEntry>): Promise<void> {
+    await ensureParentDir(this.filePath);
+    await writeFile(this.filePath, JSON.stringify(store, null, 2), "utf-8");
+  }
+}
+
+export function createKeyValueStore(options?: KeyValueStoreFactoryOptions): KeyValueStore {
+  const driver = (options?.driver ?? process.env.KV_STORE_DRIVER ?? "file").toLowerCase();
+  switch (driver) {
+    case "file":
+      return new FileKeyValueStore(options?.filePath ?? process.env.KV_STORE_FILE ?? DEFAULT_KV_STORE_FILE);
+    default:
+      throw new Error(`Unsupported KV store driver: ${driver}`);
+  }
+}
+
+export interface JsonDocumentStore {
+  getDocument<T = unknown>(collection: string, id: string): Promise<T | null>;
+  upsertDocument<T = unknown>(collection: string, id: string, document: T): Promise<void>;
+  deleteDocument(collection: string, id: string): Promise<void>;
+}
+
+type JsonDocumentStoreFactoryOptions = {
+  driver?: string;
+  rootDir?: string;
+  objectStoreOptions?: ObjectStoreFactoryOptions;
+};
+
+class FileJsonDocumentStore implements JsonDocumentStore {
+  constructor(private readonly rootDir: string) {}
+
+  async getDocument<T = unknown>(collection: string, id: string): Promise<T | null> {
+    try {
+      const raw = await readFile(this.resolve(collection, id), "utf-8");
+      return JSON.parse(raw) as T;
+    } catch {
+      return null;
+    }
+  }
+
+  async upsertDocument<T = unknown>(collection: string, id: string, document: T): Promise<void> {
+    const resolved = this.resolve(collection, id);
+    await ensureParentDir(resolved);
+    await writeFile(resolved, JSON.stringify(document, null, 2), "utf-8");
+  }
+
+  async deleteDocument(collection: string, id: string): Promise<void> {
+    try {
+      await unlink(this.resolve(collection, id));
+    } catch {
+      // ignore
+    }
+  }
+
+  private resolve(collection: string, id: string): string {
+    return path.resolve(this.rootDir, collection, `${id}.json`);
+  }
+}
+
+class ObjectJsonDocumentStore implements JsonDocumentStore {
+  constructor(private readonly store: ObjectStore, private readonly prefix: string) {}
+
+  async getDocument<T = unknown>(collection: string, id: string): Promise<T | null> {
+    const key = this.key(collection, id);
+    const data = await this.store.getObject(key);
+    if (!data) {
+      return null;
+    }
+    return JSON.parse(data.toString("utf-8")) as T;
+  }
+
+  async upsertDocument<T = unknown>(collection: string, id: string, document: T): Promise<void> {
+    const key = this.key(collection, id);
+    const payload = JSON.stringify(document, null, 2);
+    await this.store.putObject(key, payload);
+  }
+
+  async deleteDocument(collection: string, id: string): Promise<void> {
+    const key = this.key(collection, id);
+    await this.store.deleteObject(key);
+  }
+
+  private key(collection: string, id: string): string {
+    return `${this.prefix}/${collection}/${id}.json`;
+  }
+}
+
+export function createJsonDocumentStore(options?: JsonDocumentStoreFactoryOptions): JsonDocumentStore {
+  const driver = (options?.driver ?? process.env.JSON_STORE_DRIVER ?? "file").toLowerCase();
+  switch (driver) {
+    case "file":
+      return new FileJsonDocumentStore(options?.rootDir ?? process.env.JSON_STORE_ROOT ?? DEFAULT_JSON_STORE_DIR);
+    case "s3": {
+      const prefix = process.env.JSON_STORE_PREFIX ?? "json";
+      const objectStore =
+        options?.objectStoreOptions && options.objectStoreOptions.driver
+          ? createObjectStore(options.objectStoreOptions)
+          : createObjectStore({ driver: "s3" });
+      return new ObjectJsonDocumentStore(objectStore, prefix);
+    }
+    default:
+      throw new Error(`Unsupported JSON store driver: ${driver}`);
+  }
+}
+
+export interface CodeStore {
+  saveSnippet(input: { path: string; content: string }): Promise<void>;
+  readSnippet(path: string): Promise<string | null>;
+  deleteSnippet(path: string): Promise<void>;
+}
+
+type CodeStoreFactoryOptions = {
+  driver?: string;
+  rootDir?: string;
+  objectStoreOptions?: ObjectStoreFactoryOptions;
+};
+
+class FileCodeStore implements CodeStore {
+  constructor(private readonly rootDir: string) {}
+
+  async saveSnippet(input: { path: string; content: string }): Promise<void> {
+    const resolved = this.resolve(input.path);
+    await ensureParentDir(resolved);
+    await writeFile(resolved, input.content, "utf-8");
+  }
+
+  async readSnippet(pathName: string): Promise<string | null> {
+    try {
+      return await readFile(this.resolve(pathName), "utf-8");
+    } catch {
+      return null;
+    }
+  }
+
+  async deleteSnippet(pathName: string): Promise<void> {
+    try {
+      await unlink(this.resolve(pathName));
+    } catch {
+      // ignore
+    }
+  }
+
+  private resolve(pathName: string): string {
+    const normalized = pathName.replace(/^\/+/, "");
+    return path.resolve(this.rootDir, normalized);
+  }
+}
+
+class ObjectCodeStore implements CodeStore {
+  constructor(private readonly store: ObjectStore, private readonly prefix: string) {}
+
+  async saveSnippet(input: { path: string; content: string }): Promise<void> {
+    const key = this.key(input.path);
+    await this.store.putObject(key, input.content);
+  }
+
+  async readSnippet(pathName: string): Promise<string | null> {
+    const key = this.key(pathName);
+    const data = await this.store.getObject(key);
+    return data ? data.toString("utf-8") : null;
+  }
+
+  async deleteSnippet(pathName: string): Promise<void> {
+    const key = this.key(pathName);
+    await this.store.deleteObject(key);
+  }
+
+  private key(pathName: string): string {
+    const normalized = pathName.replace(/^\/+/, "");
+    return `${this.prefix}/${normalized}`;
+  }
+}
+
+export function createCodeStore(options?: CodeStoreFactoryOptions): CodeStore {
+  const driver = (options?.driver ?? process.env.CODE_STORE_DRIVER ?? "file").toLowerCase();
+  switch (driver) {
+    case "file":
+      return new FileCodeStore(options?.rootDir ?? process.env.CODE_STORE_ROOT ?? DEFAULT_CODE_STORE_DIR);
+    case "s3": {
+      const prefix = process.env.CODE_STORE_PREFIX ?? "code";
+      const objectStore =
+        options?.objectStoreOptions && options.objectStoreOptions.driver
+          ? createObjectStore(options.objectStoreOptions)
+          : createObjectStore({ driver: "s3" });
+      return new ObjectCodeStore(objectStore, prefix);
+    }
+    default:
+      throw new Error(`Unsupported code store driver: ${driver}`);
+  }
+}
+
+function hashVector(vector: number[]): string {
+  const hash = createHash("sha256");
+  vector.forEach((value) => {
+    hash.update(value.toString());
+    hash.update("|");
+  });
+  return hash.digest("hex");
+}
+
+function cosineSimilarity(a: number[], b: number[]): number {
+  if (!a.length || a.length !== b.length) {
+    return 0;
+  }
+  let dot = 0;
+  let magA = 0;
+  let magB = 0;
+  for (let i = 0; i < a.length; i += 1) {
+    dot += a[i] * b[i];
+    magA += a[i] * a[i];
+    magB += b[i] * b[i];
+  }
+  if (!magA || !magB) {
+    return 0;
+  }
+  return dot / (Math.sqrt(magA) * Math.sqrt(magB));
 }

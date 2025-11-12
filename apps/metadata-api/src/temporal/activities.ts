@@ -1,7 +1,8 @@
 import { randomUUID } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { getPrismaClient } from "../prismaClient.js";
-import { getMetadataStore } from "../context.js";
+import { getMetadataStore, getGraphStore } from "../context.js";
+import type { GraphStore, TenantContext, MetadataRecord } from "@metadata/core";
 import { EndpointTemplate, EndpointBuildResult, EndpointTestResult } from "../types.js";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
@@ -56,6 +57,8 @@ export type CatalogRecordInput = {
   payload: Record<string, unknown>;
 };
 
+const CATALOG_DATASET_DOMAIN = "catalog.dataset";
+
 export const activities: MetadataActivities = {
   async markRunStarted({
     runId,
@@ -101,17 +104,24 @@ export const activities: MetadataActivities = {
       throw new Error("Metadata collection run not found");
     }
     const store = await getMetadataStore();
+    const graphStore = await getGraphStore();
     const projectCache = new Map<string, string>();
+    const tenantId = process.env.TENANT_ID ?? "dev";
     await Promise.all(
       resolvedRecords.map(async (record) => {
         const requestedProjectId = record.projectId || run.endpoint.projectId || DEFAULT_METADATA_PROJECT;
         const projectId = await getOrCreateProjectId(prisma, projectCache, requestedProjectId);
-        store.upsertRecord({
+        const savedRecord = await store.upsertRecord({
           id: record.id ?? `${run.endpoint.id}-${randomUUID()}`,
           projectId,
           domain: record.domain,
           labels: record.labels ?? [],
           payload: record.payload,
+        });
+        await syncRecordToGraph(savedRecord, graphStore, {
+          tenantId,
+          projectId,
+          actorId: run.endpoint.id,
         });
       }),
     );
@@ -295,4 +305,40 @@ async function deleteTempFile(recordsPath?: string | null) {
   } catch {
     // ignore cleanup failures
   }
+}
+
+async function syncRecordToGraph(
+  record: MetadataRecord<unknown>,
+  graphStore: GraphStore,
+  context: TenantContext,
+): Promise<void> {
+  if (record.domain !== CATALOG_DATASET_DOMAIN) {
+    return;
+  }
+  const payload = normalizeObject(record.payload);
+  const dataset = normalizeObject(payload.dataset ?? payload);
+  const displayName =
+    (dataset.displayName as string | undefined) ??
+    (dataset.name as string | undefined) ??
+    (record.id ?? "dataset").toString();
+  const canonicalPath = (dataset.id as string | undefined) ?? record.id ?? displayName;
+  await graphStore.upsertEntity(
+    {
+      id: record.id,
+      entityType: CATALOG_DATASET_DOMAIN,
+      displayName,
+      canonicalPath,
+      sourceSystem: (dataset.source as string | undefined) ?? undefined,
+      specRef: (dataset.specRef as string | undefined) ?? undefined,
+      properties: payload,
+    },
+    context,
+  );
+}
+
+function normalizeObject(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, unknown>;
 }

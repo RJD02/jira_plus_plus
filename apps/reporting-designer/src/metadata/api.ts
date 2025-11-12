@@ -3,12 +3,17 @@ export async function fetchMetadataGraphQL<T>(
   query: string,
   variables?: Record<string, unknown>,
   signal?: AbortSignal,
+  options?: { token?: string },
 ): Promise<T> {
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (options?.token) {
+    headers.Authorization = `Bearer ${options.token}`;
+  }
   const response = await fetch(endpoint, {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-    },
+    headers,
     body: JSON.stringify({ query, variables }),
     signal,
   });

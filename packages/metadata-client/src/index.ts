@@ -45,7 +45,7 @@ export type MetadataClientOptions = {
   mode?: MetadataClientMode;
   manifestPath?: string;
   graphqlEndpoint?: string;
-  headers?: Record<string, string>;
+  headers?: Record<string, string> | (() => Record<string, string> | undefined);
   fetchImpl?: typeof fetch;
 };
 
@@ -57,7 +57,7 @@ export class MetadataClient {
   private readonly mode: MetadataClientMode;
   private readonly manifestPath: string;
   private readonly graphqlEndpoint?: string;
-  private readonly headers?: Record<string, string>;
+  private readonly headersProvider?: () => Record<string, string> | undefined;
   private readonly fetchImpl?: typeof fetch;
   private datasetCache: MetadataDataset[] | null = null;
 
@@ -67,7 +67,14 @@ export class MetadataClient {
     this.mode = inferredMode;
     this.manifestPath = options?.manifestPath ?? DEFAULT_MANIFEST_PATH;
     this.graphqlEndpoint = options?.graphqlEndpoint;
-    this.headers = options?.headers;
+    if (typeof options?.headers === "function") {
+      this.headersProvider = options.headers;
+    } else if (options?.headers) {
+      const staticHeaders = { ...options.headers };
+      this.headersProvider = () => staticHeaders;
+    } else {
+      this.headersProvider = undefined;
+    }
     // Bind fetch to globalThis so browser polyfills that depend on `this` keep working.
     this.fetchImpl =
       options?.fetchImpl ??
@@ -189,9 +196,13 @@ export class MetadataClient {
         }
       }
     `;
+    const headers = {
+      "Content-Type": "application/json",
+      ...(this.headersProvider?.() ?? {}),
+    };
     const response = await this.fetchImpl(this.graphqlEndpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json", ...(this.headers ?? {}) },
+      headers,
       body: JSON.stringify({ query }),
     });
     if (!response.ok) {

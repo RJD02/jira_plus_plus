@@ -2,8 +2,7 @@ import { ApolloClient, HttpLink, InMemoryCache, from } from "@apollo/client";
 import { setContext } from "@apollo/client/link/context";
 import { onError } from "@apollo/client/link/error";
 import { emitUnauthorized } from "./auth-events";
-
-export const TOKEN_STORAGE_KEY = "jira-plus-plus/token";
+import { getAuthToken } from "./auth-token";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -18,7 +17,7 @@ function createApolloClient() {
   });
 
   const authLink = setContext((_, { headers }) => {
-    const token = typeof window !== "undefined" ? window.localStorage.getItem(TOKEN_STORAGE_KEY) : null;
+    const token = getAuthToken();
     return {
       headers: {
         ...headers,

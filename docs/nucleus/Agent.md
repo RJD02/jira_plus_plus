@@ -54,6 +54,12 @@ These guidelines shape every automated action taken by Nucleus agents—from met
 - When starting long-running servers (e.g., `pnpm start`, `pnpm --filter … dev`), wrap them in explicit timeouts or background them with logs piped to `/tmp/*.log`; never block the automation session waiting for a server to exit.
 - Log the PID and cleanup command for any background job so humans can kill stray processes without guesswork.
 
+## Closed-Loop Execution
+- Apply every prerequisite within the directive—env vars, config files, infra restarts—before claiming success. If a feature needs Keycloak, docker compose, or PID-managed workers, wire them up inside the same run.
+- Keep iterating until the expected behaviour is observed; partial progress without verification is treated as a failure.
+- After each change run the relevant verification (unit, integration, manual curl) and, when it fails, capture context, adjust the plan, and retry rather than handing off a broken state.
+- **When working on the metadata (Nucleus) console, treat it as a separate product from Jira++**: use the designer dev server + metadata APIs/TDD loops documented in `docs/nucleus/specs/...`. Do not conflate UI elements or tests between the two apps.
+
 ## UI/UX Surfaces
 - Treat `docs/nucleus/ui-ux-guidelines.md` as the source of truth for when to prefer full pages (deep-linkable, agent-ready context) versus dialogs/drawers (≤5 fields, quick edits); do not ship UI without cross-checking the matrix.
 - Primary metadata flows—endpoint registration, dataset deep dives, scheduling—belong on dedicated routes with agent briefs/logs visible so automations can pick up context instantly.

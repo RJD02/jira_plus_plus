@@ -69,6 +69,42 @@ Once the API is up you can trigger sourcing jobs through the Metadata Console
 under the hood. The CLI utilities remain available for emergency/manual use,
 but the supported flow is entirely UI-driven.
 
+### Keycloak & Auth stack
+
+Authentication now relies on a local Keycloak realm so GraphQL requests
+carry `tenant_id`, `project_id`, and role claims. Bring the auth stack up
+with:
+
+```bash
+scripts/start-keycloak.sh          # spins up Postgres + Keycloak on http://localhost:8081
+scripts/test-keycloak.sh           # fetches a token for the seeded dev user
+```
+
+Shut it down with `scripts/stop-keycloak.sh`. The imported realm lives under
+`infra/keycloak/realm-nucleus.json` and exposes a confidential client
+`jira-plus-plus` (secret `change-me`) plus a sample user
+`dev-writer/password`. Override any of the defaults via the `KEYCLOAK_*`
+variables in `.env`.
+
+When the metadata API is running you can verify auth end-to-end by pairing
+`scripts/test-keycloak.sh` with a GraphQL call:
+
+```bash
+TOKEN=$(scripts/test-keycloak.sh)
+curl -s -H "Authorization: Bearer $TOKEN" \\
+  -H "Content-Type: application/json" \\
+  -d '{"query":"{ health { status version } }"}' \\
+  http://localhost:4010/graphql
+```
+
+The response should include `status: "ok"`; a 403 indicates the metadata API
+is still running without the Keycloak realm configured.
+
+The web console expects the same configuration at build time. Populate
+`VITE_KEYCLOAK_BASE_URL`, `VITE_KEYCLOAK_REALM`, and
+`VITE_KEYCLOAK_CLIENT_ID` in your `.env` (or `.env.local`) so Vite injects
+them when you run `pnpm dev`.
+
 ## Test Strategy
 
 - **Unit tests**: `pnpm --filter @jira-plus-plus/* test -- --run` for the package you touch.
@@ -103,6 +139,8 @@ The pre-push hook blocks direct commits on `main`, nudging you back to the PR fl
 
 - `apps/web/.env.development` targets the local API (`http://localhost:4000`).
 - `.env.example` is the canonical template for new developers.
+- `VITE_APP_BRAND` tunes the UI copy per app (set to `Jira++ Console` for the Jira UI, `Nucleus Metadata Console` for the designer).
+- The designer runs on its own dev port (`VITE_DESIGNER_DEV_PORT`, defaults to 5176) so it no longer collides with the Jira++ dev server on 5175.
 - Never commit real secrets; use `infra/.env.template` to document runtime
   expectations.
 - UAT/production deployments require SMTP credentials

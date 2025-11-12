@@ -50,6 +50,8 @@ export type MetadataEndpointSummary = {
   detectedVersion?: string | null;
   versionHint?: string | null;
   capabilities?: string[] | null;
+  deletedAt?: string | null;
+  deletionReason?: string | null;
   runs: MetadataCollectionRunSummary[];
 };
 

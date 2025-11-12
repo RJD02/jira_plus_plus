@@ -15,6 +15,7 @@
     "@monaco-editor/react": "^4.7.0",
     "@metadata/client": "workspace:*",
     "@reporting/registry": "workspace:*",
+    "keycloak-js": "^23.0.7",
     "monaco-editor": "^0.54.0",
     "react": "18.2.0",
     "react-dom": "18.2.0",

@@ -3,6 +3,7 @@ import { startStandaloneServer } from "@apollo/server/standalone";
 import type { IncomingMessage } from "node:http";
 import { createResolvers, typeDefs } from "./schema.js";
 import { getMetadataStore } from "./context.js";
+import { authenticateRequest } from "./auth.js";
 
 async function main() {
   const store = await getMetadataStore();
@@ -19,6 +20,8 @@ async function main() {
     context: async ({ req }) => ({
       request: req,
       userId: readHeader(req, "x-user-id"),
+      auth: await authenticateRequest(req.headers.authorization ?? null),
+      bypassWrites: readHeader(req, "x-metadata-test-write") === "1",
     }),
   });
 

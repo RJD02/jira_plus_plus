@@ -34,21 +34,19 @@ type MetadataWorkspaceProps = {
   catalogDatasets: CatalogDataset[];
   selectedDatasetIds: string[];
   toggleDatasetSelection: (datasetId: string) => void;
+  authToken?: string | null;
 };
 
 type MetadataSection = "catalog" | "endpoints" | "collections";
 type MetadataView = "overview" | "endpoint-register";
 type TemplateFamily = "JDBC" | "HTTP" | "STREAM";
 
-type MetadataNavEntry =
-  | { id: MetadataSection; type: "section"; label: string; description: string; icon: IconType }
-  | { id: "endpoint-register"; type: "page"; label: string; description: string; icon: IconType };
+type MetadataNavEntry = { id: MetadataSection; type: "section"; label: string; description: string; icon: IconType };
 
 const metadataNavItems: MetadataNavEntry[] = [
   { id: "catalog", type: "section" as const, label: "Catalog", description: "Datasets & schema", icon: LuTable },
   { id: "endpoints", type: "section" as const, label: "Endpoints", description: "Sources & templates", icon: LuNetwork },
   { id: "collections", type: "section" as const, label: "Collections", description: "Run history", icon: LuHistory },
-  { id: "endpoint-register", type: "page" as const, label: "Register endpoint", description: "Onboard a new source", icon: LuSquarePlus },
 ];
 
 const metadataSectionTabs: Array<{ id: MetadataSection; label: string }> = [
@@ -90,6 +88,7 @@ export function MetadataWorkspace({
   catalogDatasets,
   selectedDatasetIds,
   toggleDatasetSelection,
+  authToken,
 }: MetadataWorkspaceProps) {
   const [metadataEndpoints, setMetadataEndpoints] = useState<MetadataEndpointSummary[]>([]);
   const [metadataRuns, setMetadataRuns] = useState<MetadataCollectionRunSummary[]>([]);
@@ -382,7 +381,13 @@ export function MetadataWorkspace({
       try {
         const payload = await fetchMetadataGraphQL<{
           previewMetadataDataset: DatasetPreviewResult | null;
-        }>(metadataEndpoint, PREVIEW_METADATA_DATASET_MUTATION, { id: datasetId, limit });
+        }>(
+          metadataEndpoint,
+          PREVIEW_METADATA_DATASET_MUTATION,
+          { id: datasetId, limit },
+          undefined,
+          { token: authToken ?? undefined },
+        );
         setMetadataCatalogPreviewRows((prev) => ({
           ...prev,
           [datasetId]: payload.previewMetadataDataset ?? { rows: [] },
@@ -398,7 +403,7 @@ export function MetadataWorkspace({
         }
       }
     },
-    [metadataEndpoint],
+    [authToken, metadataEndpoint],
   );
 
   const handleRegisterMetadataEndpoint = useCallback(
@@ -421,17 +426,23 @@ export function MetadataWorkspace({
           templateId: selectedTemplate.id,
           parameters: metadataTemplateValues,
         };
-        await fetchMetadataGraphQL(metadataEndpoint, REGISTER_METADATA_ENDPOINT_MUTATION, {
-          input: {
-            name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
-            description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
-            verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
-            url: null,
-            domain: selectedTemplate.domain ?? undefined,
-            labels: labels.length ? labels : undefined,
-            config: configPayload,
+        await fetchMetadataGraphQL(
+          metadataEndpoint,
+          REGISTER_METADATA_ENDPOINT_MUTATION,
+          {
+            input: {
+              name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
+              description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
+              verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
+              url: null,
+              domain: selectedTemplate.domain ?? undefined,
+              labels: labels.length ? labels : undefined,
+              config: configPayload,
+            },
           },
-        });
+          undefined,
+          { token: authToken ?? undefined },
+        );
         setMetadataTemplateValues({});
         setMetadataEndpointName("");
         setMetadataEndpointDescription("");
@@ -445,6 +456,7 @@ export function MetadataWorkspace({
       }
     },
     [
+      authToken,
       metadataEndpoint,
       metadataEndpointDescription,
       metadataEndpointLabels,
@@ -474,17 +486,23 @@ export function MetadataWorkspace({
       };
       const payload = await fetchMetadataGraphQL<{
         testMetadataEndpoint: MetadataEndpointTestResult;
-      }>(metadataEndpoint, TEST_METADATA_ENDPOINT_MUTATION, {
-        input: {
-          name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
-          description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
-          verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
-          url: null,
-          domain: selectedTemplate.domain ?? undefined,
-          labels: userLabels.length ? userLabels : undefined,
-          config: configPayload,
+      }>(
+        metadataEndpoint,
+        TEST_METADATA_ENDPOINT_MUTATION,
+        {
+          input: {
+            name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
+            description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
+            verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
+            url: null,
+            domain: selectedTemplate.domain ?? undefined,
+            labels: userLabels.length ? userLabels : undefined,
+            config: configPayload,
+          },
         },
-      });
+        undefined,
+        { token: authToken ?? undefined },
+      );
       const result = payload.testMetadataEndpoint;
       setMetadataTestResult(result);
     } catch (error) {
@@ -497,6 +515,7 @@ export function MetadataWorkspace({
       setMetadataTesting(false);
     }
   }, [
+    authToken,
     metadataEndpoint,
     metadataEndpointDescription,
     metadataEndpointLabels,
@@ -520,18 +539,24 @@ export function MetadataWorkspace({
               .map((schema) => schema.trim())
               .filter(Boolean)
           : undefined;
-        await fetchMetadataGraphQL(metadataEndpoint, TRIGGER_METADATA_COLLECTION_MUTATION, {
-          input: {
-            endpointId,
-            schemas,
+        await fetchMetadataGraphQL(
+          metadataEndpoint,
+          TRIGGER_METADATA_COLLECTION_MUTATION,
+          {
+            input: {
+              endpointId,
+              schemas,
+            },
           },
-        });
+          undefined,
+          { token: authToken ?? undefined },
+        );
         refreshMetadataWorkspace();
       } catch (error) {
         setMetadataMutationError(error instanceof Error ? error.message : String(error));
       }
     },
-    [metadataEndpoint, metadataRunOverrides, refreshMetadataWorkspace],
+    [authToken, metadataEndpoint, metadataRunOverrides, refreshMetadataWorkspace],
   );
 
   useEffect(() => {
@@ -613,7 +638,9 @@ export function MetadataWorkspace({
           metadataEndpoints: MetadataEndpointSummary[];
           metadataCollectionRuns: MetadataCollectionRunSummary[];
           metadataEndpointTemplates: MetadataEndpointTemplate[];
-        }>(metadataEndpoint, METADATA_OVERVIEW_QUERY, { runsLimit: 30 }, controller.signal);
+        }>(metadataEndpoint, METADATA_OVERVIEW_QUERY, { runsLimit: 30 }, controller.signal, {
+          token: authToken ?? undefined,
+        });
         if (controller.signal.aborted) {
           return;
         }
@@ -633,7 +660,7 @@ export function MetadataWorkspace({
 
     void loadMetadataOverview();
     return () => controller.abort();
-  }, [metadataEndpoint, metadataRefreshToken]);
+  }, [authToken, metadataEndpoint, metadataRefreshToken]);
 
   useEffect(() => {
     if (!metadataCatalogSelectedDataset) {
@@ -707,7 +734,7 @@ export function MetadataWorkspace({
     const previewColumns = previewTableColumns(previewRows);
     return (
       <div className="grid gap-6 lg:grid-cols-[320px,1fr]">
-        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
+        <section className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900" data-testid="metadata-dataset-detail">
           <div>
             <p className="text-sm font-semibold uppercase tracking-[0.3em] text-slate-500">Datasets</p>
             <p className="text-xs text-slate-500">Search catalog entries ingested from the metadata service.</p>
@@ -783,7 +810,10 @@ export function MetadataWorkspace({
           </div>
           <div className="scrollbar-thin mt-4 max-h-[calc(100vh-320px)] overflow-y-auto pr-1">
             {metadataCatalogFilteredDatasets.length === 0 ? (
-              <p className="rounded-xl border border-dashed border-slate-300 px-3 py-4 text-xs text-slate-500 dark:border-slate-700">
+              <p
+                className="rounded-xl border border-dashed border-slate-300 px-3 py-4 text-xs text-slate-500 dark:border-slate-700"
+                data-testid="metadata-catalog-empty"
+              >
                 No datasets match that query.
               </p>
             ) : (
@@ -795,6 +825,7 @@ export function MetadataWorkspace({
                     key={dataset.id}
                     type="button"
                     onClick={() => setMetadataCatalogSelection(dataset.id)}
+                    data-testid="metadata-catalog-card"
                     className={`mb-2 flex w-full flex-col rounded-2xl border px-3 py-2 text-left transition ${
                       isActive
                         ? "border-slate-900 bg-slate-900 text-white shadow dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900"
@@ -850,6 +881,7 @@ export function MetadataWorkspace({
                         : "border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-600"
                     }`}
                     disabled={!canPreviewDataset || isPreviewingActive}
+                    data-testid="metadata-preview-button"
                   >
                     {isPreviewingActive ? <LuHistory className="h-3 w-3 animate-spin" /> : <LuTable className="h-3 w-3" />}
                     {isPreviewingActive ? "Fetching…" : "Preview dataset"}
@@ -908,7 +940,10 @@ export function MetadataWorkspace({
                   </p>
                 ) : null}
                 {previewRows.length ? (
-                  <div className="mt-3 max-h-64 overflow-auto rounded-2xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900">
+                  <div
+                    className="mt-3 max-h-64 overflow-auto rounded-2xl border border-slate-200 bg-white dark:border-slate-700 dark:bg-slate-900"
+                    data-testid="metadata-preview-table"
+                  >
                     <table className="min-w-full divide-y divide-slate-200 text-xs dark:divide-slate-700">
                       <thead className="bg-slate-50 text-left font-semibold text-slate-600 dark:bg-slate-900 dark:text-slate-300">
                         <tr>
@@ -933,14 +968,14 @@ export function MetadataWorkspace({
                     </table>
                   </div>
                 ) : (
-                  <p className="mt-2 text-xs text-slate-500">
+                  <p className="mt-2 text-xs text-slate-500" data-testid="metadata-preview-empty">
                     {isPreviewingActive ? "Collecting sample rows…" : "No preview sampled yet. Run a preview to inspect live data."}
                   </p>
                 )}
               </div>
             </div>
           ) : (
-            <p className="rounded-xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700">
+            <p className="rounded-xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700" data-testid="metadata-dataset-empty">
               Select a dataset on the left to inspect its schema.
             </p>
           )}
@@ -950,7 +985,7 @@ export function MetadataWorkspace({
   };
 
   const renderEndpointRegistrationPage = () => (
-    <div className="space-y-6">
+    <div className="space-y-6" data-testid="metadata-register-form">
       <div className="grid gap-6 lg:grid-cols-[minmax(300px,340px),1fr]">
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           <div>
@@ -1298,7 +1333,7 @@ export function MetadataWorkspace({
         </section>
         <section className="space-y-4">
         {metadataEndpoints.length === 0 ? (
-          <p className="rounded-2xl border border-dashed border-slate-300 px-6 py-6 text-sm text-slate-500 dark:border-slate-700">
+          <p className="rounded-2xl border border-dashed border-slate-300 px-6 py-6 text-sm text-slate-500 dark:border-slate-700" data-testid="metadata-endpoint-empty">
             No metadata endpoints have been registered yet.
           </p>
         ) : null}
@@ -1307,6 +1342,7 @@ export function MetadataWorkspace({
           return (
             <article
               key={endpoint.id}
+              data-testid="metadata-endpoint-card"
               className="rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900"
             >
               <div className="flex flex-wrap items-center gap-3">
@@ -1381,9 +1417,9 @@ export function MetadataWorkspace({
   };
 
   const renderCollectionsSection = () => (
-    <div className="space-y-4">
+    <div className="space-y-4" data-testid="metadata-collections-panel">
       {sortedMetadataRuns.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700">
+        <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700" data-testid="metadata-collections-empty">
           No collection runs recorded yet. Trigger a run from the endpoint cards.
         </p>
       ) : (
@@ -1450,54 +1486,47 @@ export function MetadataWorkspace({
     <>
       <section className="flex flex-1 bg-slate-50 dark:bg-slate-950">
         <aside
-          className={`hidden border-r border-slate-200 bg-white/70 py-6 transition-[width] dark:border-slate-800 dark:bg-slate-900/40 lg:flex ${
-            sectionNavCollapsed ? "w-16 px-2" : "w-64 px-4"
+          className={`hidden border-r border-slate-200 bg-white/80 py-5 transition-[width] dark:border-slate-800 dark:bg-slate-900/40 lg:flex ${
+            sectionNavCollapsed ? "w-14 px-1.5" : "w-56 px-3.5"
           }`}
         >
-          <div className="flex w-full flex-col gap-4">
-            <div className="flex items-center justify-between px-2">
-              {!sectionNavCollapsed ? (
-                <p className="text-[10px] font-semibold uppercase tracking-[0.35em] text-slate-500">Navigation</p>
-              ) : null}
+          <div className="flex w-full flex-col gap-5">
+            <div className="flex items-center justify-between px-1.5">
+              {!sectionNavCollapsed && (
+                <p className="text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500">Navigation</p>
+              )}
               <button
                 type="button"
                 onClick={() => setSectionNavCollapsed((prev) => !prev)}
-                className="rounded-full border border-slate-200 px-2 py-1 text-[10px] uppercase tracking-[0.3em] text-slate-500 dark:border-slate-700 dark:text-slate-300"
+                className="inline-flex h-7 w-7 items-center justify-center rounded-full border border-slate-200 text-[10px] font-semibold uppercase tracking-[0.2em] text-slate-500 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-700 dark:text-slate-300"
               >
                 {sectionNavCollapsed ? "›" : "‹"}
               </button>
             </div>
-            <div className="space-y-2">
+            <div className="space-y-1.5">
               {metadataNavItems.map((entry) => {
                 const Icon = entry.icon;
-                const isActive =
-                  entry.type === "section"
-                    ? metadataView === "overview" && metadataSection === entry.id
-                    : metadataView === "endpoint-register";
+                const isActive = metadataView === "overview" && metadataSection === entry.id;
                 return (
                   <button
                     key={entry.id}
                     type="button"
                     onClick={() => {
-                      if (entry.type === "section") {
-                        setMetadataView("overview");
-                        setMetadataSection(entry.id);
-                      } else {
-                        handleOpenRegistration();
-                      }
+                      setMetadataView("overview");
+                      setMetadataSection(entry.id);
                     }}
-                    className={`flex w-full items-center gap-3 rounded-2xl border px-3 py-2 text-left transition ${
+                    className={`group flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${
                       isActive
-                        ? "border-slate-900 bg-slate-900 text-white shadow dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900"
+                        ? "border-slate-900 bg-slate-900 text-white shadow-sm dark:border-slate-100 dark:bg-slate-100 dark:text-slate-900"
                         : "border-slate-200 text-slate-600 hover:border-slate-900 hover:text-slate-900 dark:border-slate-700 dark:text-slate-200"
                     }`}
                     title={sectionNavCollapsed ? entry.label : undefined}
                   >
-                    <Icon className="h-4 w-4" />
+                    <Icon className="h-4 w-4 shrink-0" />
                     {!sectionNavCollapsed ? (
-                      <div>
-                        <p className="text-sm font-semibold">{entry.label}</p>
-                        <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">{entry.description}</p>
+                      <div className="min-w-0">
+                        <p className="truncate text-sm font-semibold">{entry.label}</p>
+                        <p className="text-[10px] uppercase tracking-[0.25em] text-slate-400">{entry.description}</p>
                       </div>
                     ) : null}
                   </button>
@@ -1528,13 +1557,23 @@ export function MetadataWorkspace({
               ← Back to overview
             </button>
           ) : (
-            <button
-              type="button"
-              onClick={refreshMetadataWorkspace}
-              className="mt-4 inline-flex items-center gap-2 rounded-full border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-300 lg:mt-0"
-            >
-              <LuRefreshCcw className="h-4 w-4" /> Refresh
-            </button>
+            <div className="mt-4 flex flex-wrap items-center gap-2 lg:mt-0">
+              <button
+                type="button"
+                onClick={refreshMetadataWorkspace}
+                className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-300"
+              >
+                <LuRefreshCcw className="h-4 w-4" /> Refresh
+              </button>
+              <button
+                type="button"
+                onClick={() => handleOpenRegistration()}
+                className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 dark:bg-emerald-500 dark:text-slate-900"
+                data-testid="metadata-register-open"
+              >
+                <LuSquarePlus className="h-4 w-4" /> Register endpoint
+              </button>
+            </div>
           )}
         </header>
         {metadataView === "overview" ? (
@@ -1557,6 +1596,7 @@ export function MetadataWorkspace({
               type="button"
               onClick={() => handleOpenRegistration()}
               className="ml-auto rounded-full bg-slate-900 px-4 py-1.5 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow hover:bg-slate-800 dark:bg-emerald-500 dark:text-slate-900"
+              data-testid="metadata-register-open"
             >
               Register endpoint
             </button>
@@ -1570,7 +1610,10 @@ export function MetadataWorkspace({
       {metadataDatasetDetail ? (
         <div className="fixed inset-0 z-40 flex justify-end">
           <div className="absolute inset-0 bg-slate-900/40" onClick={() => setMetadataDatasetDetailId(null)} />
-          <section className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-200 bg-white px-6 py-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950">
+          <section
+            className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-200 bg-white px-6 py-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950"
+            data-testid="metadata-dataset-detail-drawer"
+          >
             <div className="flex items-center justify-between border-b border-slate-200 pb-4 dark:border-slate-800">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-500">Dataset detail</p>
@@ -1646,7 +1689,10 @@ export function MetadataWorkspace({
       {metadataEndpointDetail ? (
         <div className="fixed inset-0 z-40 flex justify-end">
           <div className="absolute inset-0 bg-slate-900/40" onClick={() => setMetadataEndpointDetailId(null)} />
-          <section className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-200 bg-white px-6 py-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950">
+          <section
+            className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-200 bg-white px-6 py-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950"
+            data-testid="metadata-endpoint-detail"
+          >
             <div className="flex items-center justify-between border-b border-slate-200 pb-4 dark:border-slate-800">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-500">Endpoint detail</p>

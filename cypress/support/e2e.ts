@@ -3,6 +3,103 @@
 const TOKEN_STORAGE_KEY = "jira-plus-plus/token";
 const USER_STORAGE_KEY = "jira-plus-plus/user";
 
+const defaultMetadataBaseUrl = "http://127.0.0.1:5176";
+const defaultKeycloakBaseUrl = "http://localhost:8081";
+
+function getEnvString(key: string, fallback: string): string {
+  const value = Cypress.env(key);
+  if (typeof value === "string" && value.length > 0) {
+    return value;
+  }
+  return fallback;
+}
+
+Cypress.Commands.add("metadataLogin", () => {
+  const metadataBaseUrl = getEnvString("metadataBaseUrl", defaultMetadataBaseUrl);
+  const keycloakBaseUrl = getEnvString("keycloakBaseUrl", defaultKeycloakBaseUrl);
+  const keycloakUsername = getEnvString("keycloakTestUsername", "dev-writer");
+  const keycloakPassword = getEnvString("keycloakTestPassword", "password");
+
+  cy.session(
+    ["metadata", keycloakUsername],
+    () => {
+      cy.visit(metadataBaseUrl);
+      cy.contains("Continue with Keycloak").click();
+      cy.origin(
+        keycloakBaseUrl,
+        { args: { username: keycloakUsername, password: keycloakPassword } },
+        ({ username, password }) => {
+          cy.get("input[name='username'], input#username").clear().type(username);
+          cy.get("input[name='password'], input#password").clear().type(password, { log: false });
+          cy.get("button[type='submit'], button#kc-login").click();
+        },
+      );
+      cy.url().should("include", metadataBaseUrl);
+    },
+    {
+      cacheAcrossSpecs: true,
+    },
+  );
+
+  cy.visit(metadataBaseUrl);
+});
+
+Cypress.Commands.add("metadataGraphQL", (options: { query: string; variables?: Record<string, unknown> }) => {
+  const metadataGraphqlEndpoint = getEnvString("metadataGraphqlEndpoint", "http://localhost:4010/graphql");
+  const keycloakBaseUrl = getEnvString("keycloakBaseUrl", defaultKeycloakBaseUrl);
+  const keycloakRealm = getEnvString("keycloakRealm", "nucleus");
+  const keycloakClientId = getEnvString("keycloakClientId", "jira-plus-plus");
+  const keycloakUsername = getEnvString("keycloakTestUsername", "dev-writer");
+  const keycloakPassword = getEnvString("keycloakTestPassword", "password");
+
+  return cy
+    .request({
+      method: "POST",
+      url: `${keycloakBaseUrl}/realms/${keycloakRealm}/protocol/openid-connect/token`,
+      form: true,
+      body: {
+        client_id: keycloakClientId,
+        grant_type: "password",
+        username: keycloakUsername,
+        password: keycloakPassword,
+      },
+    })
+    .then((tokenResponse) => {
+      const token = tokenResponse.body.access_token as string;
+      return cy.request({
+        method: "POST",
+        url: metadataGraphqlEndpoint,
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: {
+          query: options.query,
+          variables: options.variables,
+        },
+      });
+    });
+});
+
+Cypress.Commands.add("ensureMetadataCatalogHasData", () => {
+  cy.metadataGraphQL({
+    query: `
+      query CatalogSmoke {
+        catalogDatasets {
+          id
+          displayName
+        }
+      }
+    `,
+  }).then((response) => {
+    const datasets = response.body.data?.catalogDatasets ?? [];
+    expect(
+      datasets.length,
+      "metadata catalog datasets exist (seed via metadata collection before running this test)",
+    ).to.be.greaterThan(0);
+  });
+});
+
 Cypress.Commands.add("setAuth", (user) => {
   const payload = {
     id: user.id ?? "user-1",
@@ -33,6 +130,9 @@ type GraphQLResponder =
 declare global {
   namespace Cypress {
     interface Chainable {
+      metadataLogin(): Chainable<void>;
+      metadataGraphQL(options: { query: string; variables?: Record<string, unknown> }): Chainable<Cypress.Response<any>>;
+      ensureMetadataCatalogHasData(): Chainable<void>;
       setAuth(user: {
         id?: string;
         email?: string;

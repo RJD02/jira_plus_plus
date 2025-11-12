@@ -1,13 +1,17 @@
 import { randomUUID } from "node:crypto";
 import { GraphQLScalarType } from "graphql";
-import type { IncomingMessage } from "node:http";
 import { DateTimeResolver, JSONResolver } from "graphql-scalars";
 import type { MetadataStore, MetadataEndpointDescriptor, MetadataRecordInput, MetadataRecord, HttpVerb } from "@metadata/core";
 import type { EndpointBuildResult, EndpointTestResult } from "./types.js";
 import { getPrismaClient } from "./prismaClient.js";
 import { getTemporalClient } from "./temporal/client.js";
 import { WORKFLOW_NAMES } from "./temporal/workflows.js";
+import type { AuthContext } from "./auth.js";
+import sampleMetadata from "./fixtures/sample-metadata.json" assert { type: "json" };
+
 const CATALOG_DATASET_DOMAIN = process.env.METADATA_CATALOG_DOMAIN ?? "catalog.dataset";
+const DEFAULT_PROJECT_ID = process.env.METADATA_DEFAULT_PROJECT ?? "global";
+const ENABLE_SAMPLE_FALLBACK = process.env.METADATA_SAMPLE_FALLBACK !== "0";
 
 export const typeDefs = `#graphql
   scalar DateTime
@@ -60,6 +64,8 @@ export const typeDefs = `#graphql
     capabilities: [String!]
     createdAt: DateTime
     updatedAt: DateTime
+    deletedAt: DateTime
+    deletionReason: String
     runs(limit: Int): [MetadataCollectionRun!]!
     datasets(limit: Int, search: String): [CatalogDataset!]!
   }
@@ -182,6 +188,7 @@ export const typeDefs = `#graphql
     CLUSTER
     TOPIC
     GENERIC
+    FILE_PATH
   }
 
   type MetadataEndpointRequirementOption {
@@ -280,7 +287,7 @@ export const typeDefs = `#graphql
     health: Health!
     metadataDomains: [MetadataDomain!]!
     metadataRecords(domain: String!, projectId: String, labels: [String!], search: String, limit: Int): [MetadataRecord!]!
-    metadataEndpoints(projectId: String): [MetadataEndpoint!]!
+    metadataEndpoints(projectId: String, includeDeleted: Boolean): [MetadataEndpoint!]!
     metadataEndpoint(id: ID!): MetadataEndpoint
     catalogDatasets(projectId: String, labels: [String!], search: String, endpointId: ID): [CatalogDataset!]!
     metadataDataset(id: ID!): CatalogDataset
@@ -291,6 +298,7 @@ export const typeDefs = `#graphql
   type Mutation {
     upsertMetadataRecord(input: MetadataRecordInput!): MetadataRecord!
     registerMetadataEndpoint(input: MetadataEndpointInput!): MetadataEndpoint!
+    deleteMetadataEndpoint(id: ID!, reason: String): MetadataEndpoint!
     triggerMetadataCollection(input: MetadataCollectionRequestInput!): MetadataCollectionRun!
     testMetadataEndpoint(input: MetadataEndpointInput!): MetadataEndpointTestResult!
     previewMetadataDataset(id: ID!, limit: Int): CatalogDatasetPreview!
@@ -303,29 +311,49 @@ export function createResolvers(store: MetadataStore) {
     JSON: JSONResolver as GraphQLScalarType,
     Query: {
       health: () => ({ status: "ok", version: "0.1.0" }),
-      metadataDomains: async () => store.listDomains(),
+      metadataDomains: async (_parent: unknown, _args: unknown, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        return store.listDomains();
+      },
       metadataRecords: async (
         _parent: unknown,
         args: { domain: string; projectId?: string; labels?: string[]; search?: string; limit?: number },
+        ctx: ResolverContext,
       ) => {
+        enforceReadAccess(ctx);
         return store.listRecords(args.domain, {
-          projectId: args.projectId,
+          projectId: args.projectId ?? ctx.auth.projectId,
           labels: args.labels,
           search: args.search,
           limit: args.limit,
         });
       },
-      metadataEndpoints: async (_parent: unknown, args: { projectId?: string }) => store.listEndpoints(args.projectId),
-      metadataEndpoint: async (_parent: unknown, args: { id: string }) => {
-        const endpoints = await store.listEndpoints();
+      metadataEndpoints: async (
+        _parent: unknown,
+        args: { projectId?: string; includeDeleted?: boolean },
+        ctx: ResolverContext,
+      ) => {
+        enforceReadAccess(ctx);
+        const endpoints = await store.listEndpoints(args.projectId ?? ctx.auth.projectId);
+        const filtered = args.includeDeleted ? endpoints : endpoints.filter((endpoint) => !endpoint.deletedAt);
+        if (filtered.length === 0 && ENABLE_SAMPLE_FALLBACK) {
+          return buildSampleEndpoints(args.projectId ?? ctx.auth.projectId);
+        }
+        return filtered;
+      },
+      metadataEndpoint: async (_parent: unknown, args: { id: string }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
         return endpoints.find((endpoint) => endpoint.id === args.id) ?? null;
       },
       catalogDatasets: async (
         _parent: unknown,
         args: { projectId?: string; labels?: string[]; search?: string; endpointId?: string | null },
+        ctx: ResolverContext,
       ) => {
+        enforceReadAccess(ctx);
         const records = await store.listRecords(CATALOG_DATASET_DOMAIN, {
-          projectId: args.projectId,
+          projectId: args.projectId ?? ctx.auth.projectId,
           labels: args.labels,
           search: args.search,
         });
@@ -335,18 +363,33 @@ export function createResolvers(store: MetadataStore) {
         if (args.endpointId) {
           datasets = datasets.filter((dataset) => dataset.sourceEndpointId === args.endpointId);
         }
+        if (datasets.length === 0 && ENABLE_SAMPLE_FALLBACK) {
+          return buildSampleCatalogDatasets(args.projectId ?? ctx.auth.projectId);
+        }
         return datasets;
       },
-      metadataDataset: async (_parent: unknown, args: { id: string }) => {
+      metadataDataset: async (_parent: unknown, args: { id: string }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
         const record = await store.getRecord(CATALOG_DATASET_DOMAIN, args.id);
-        return record ? mapCatalogRecordToDataset(record) : null;
+        if (!record || record.projectId !== ctx.auth.projectId) {
+          return null;
+        }
+        return mapCatalogRecordToDataset(record);
       },
-      metadataCollectionRuns: async (_parent: unknown, args: { filter?: MetadataCollectionRunFilter | null; limit?: number | null }) => {
+      metadataCollectionRuns: async (
+        _parent: unknown,
+        args: { filter?: MetadataCollectionRunFilter | null; limit?: number | null },
+        ctx: ResolverContext,
+      ) => {
+        enforceReadAccess(ctx);
         const prisma = await getPrismaClient();
         return prisma.metadataCollectionRun.findMany({
           where: {
             endpointId: args.filter?.endpointId ?? undefined,
             status: args.filter?.status ?? undefined,
+            endpoint: {
+              projectId: ctx.auth.projectId,
+            },
           },
           orderBy: { requestedAt: "desc" },
           take: args.limit ?? 50,
@@ -363,10 +406,11 @@ export function createResolvers(store: MetadataStore) {
       },
     },
     Mutation: {
-      upsertMetadataRecord: async (_parent: unknown, args: { input: GraphQLMetadataRecordInput }) => {
+      upsertMetadataRecord: async (_parent: unknown, args: { input: GraphQLMetadataRecordInput }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
         const payload: MetadataRecordInput<unknown> = {
           id: args.input.id ?? undefined,
-          projectId: args.input.projectId,
+          projectId: args.input.projectId ?? ctx.auth.projectId,
           domain: args.input.domain,
           labels: args.input.labels ?? undefined,
           payload: args.input.payload,
@@ -374,7 +418,8 @@ export function createResolvers(store: MetadataStore) {
         const record = await store.upsertRecord(payload);
         return record;
       },
-      registerMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }) => {
+      registerMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
         const templateId = parseTemplateId(args.input.config);
         let built: EndpointBuildResult | undefined;
         let testResult: EndpointTestResult | null = null;
@@ -405,24 +450,41 @@ export function createResolvers(store: MetadataStore) {
           verb: ((args.input.verb as HttpVerb | undefined) ?? built?.verb ?? "POST") as HttpVerb,
           url,
           authPolicy: args.input.authPolicy ?? undefined,
-          projectId: args.input.projectId ?? undefined,
+          projectId: args.input.projectId ?? ctx.auth.projectId ?? undefined,
           domain: args.input.domain ?? built?.domain ?? undefined,
           labels: built?.labels ?? args.input.labels ?? undefined,
           config: built?.config ?? args.input.config ?? undefined,
           detectedVersion: testResult?.detectedVersion ?? undefined,
           versionHint,
           capabilities: testResult?.capabilities ?? undefined,
+          deletedAt: null,
+          deletionReason: undefined,
         };
         return store.registerEndpoint(descriptor);
+      },
+      deleteMetadataEndpoint: async (_parent: unknown, args: { id: string; reason?: string | null }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
+        const target = endpoints.find((endpoint) => endpoint.id === args.id || endpoint.sourceId === args.id);
+        if (!target) {
+          throw new Error("Endpoint not found");
+        }
+        const deleted = await store.registerEndpoint({
+          ...target,
+          deletedAt: new Date().toISOString(),
+          deletionReason: args.reason ?? target.deletionReason ?? null,
+        });
+        return deleted;
       },
       triggerMetadataCollection: async (
         _parent: unknown,
         args: { input: MetadataCollectionRequestInput },
         ctx: ResolverContext,
       ) => {
+        enforceWriteAccess(ctx);
         const prisma = await getPrismaClient();
         const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: args.input.endpointId } });
-        if (!endpoint) {
+        if (!endpoint || endpoint.projectId !== ctx.auth.projectId) {
           throw new Error("Endpoint not found");
         }
         if (!endpoint.url) {
@@ -457,7 +519,8 @@ export function createResolvers(store: MetadataStore) {
 
         return prisma.metadataCollectionRun.findUnique({ where: { id: run.id }, include: { endpoint: true } });
       },
-      testMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }) => {
+      testMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
         const templateId = parseTemplateId(args.input.config);
         if (!templateId) {
           return { success: false, message: "templateId required in config for testing." };
@@ -470,9 +533,10 @@ export function createResolvers(store: MetadataStore) {
           args: [{ templateId, parameters }],
         });
       },
-      previewMetadataDataset: async (_parent: unknown, args: { id: string; limit?: number | null }) => {
+      previewMetadataDataset: async (_parent: unknown, args: { id: string; limit?: number | null }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
         const record = await store.getRecord(CATALOG_DATASET_DOMAIN, args.id);
-        if (!record) {
+        if (!record || record.projectId !== ctx.auth.projectId) {
           throw new Error("Dataset not found");
         }
         const payload = normalizePayload(record.payload) ?? {};
@@ -507,7 +571,11 @@ export function createResolvers(store: MetadataStore) {
       },
     },
     MetadataEndpoint: {
-      runs: async (parent: { id: string }, args: { limit?: number | null }) => {
+      runs: async (parent: { id: string; projectId?: string | null }, args: { limit?: number | null }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        if (parent.projectId && parent.projectId !== ctx.auth.projectId) {
+          return [];
+        }
         const prisma = await getPrismaClient();
         return prisma.metadataCollectionRun.findMany({
           where: { endpointId: parent.id },
@@ -515,7 +583,15 @@ export function createResolvers(store: MetadataStore) {
           take: args.limit ?? 5,
         });
       },
-      datasets: async (parent: MetadataEndpointDescriptor, args: { limit?: number | null; search?: string | null }) => {
+      datasets: async (
+        parent: MetadataEndpointDescriptor,
+        args: { limit?: number | null; search?: string | null },
+        ctx: ResolverContext,
+      ) => {
+        enforceReadAccess(ctx);
+        if (parent.projectId && parent.projectId !== ctx.auth.projectId) {
+          return [];
+        }
         const records = await store.listRecords(CATALOG_DATASET_DOMAIN, {
           projectId: parent.projectId,
           search: args.search ?? undefined,
@@ -537,24 +613,87 @@ export function createResolvers(store: MetadataStore) {
       },
     },
     MetadataCollectionRun: {
-      endpoint: async (parent: any) => {
+      endpoint: async (parent: any, _args: unknown, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
         if (parent.endpoint) {
-          return parent.endpoint;
+          return parent.endpoint.projectId === ctx.auth.projectId ? parent.endpoint : null;
         }
         const prisma = await getPrismaClient();
-        return prisma.metadataEndpoint.findUnique({ where: { id: parent.endpointId } });
+        const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: parent.endpointId } });
+        if (!endpoint || endpoint.projectId !== ctx.auth.projectId) {
+          return null;
+        }
+        return endpoint;
       },
     },
     CatalogDataset: {
-      sourceEndpoint: async (parent: CatalogDataset) => {
+      sourceEndpoint: async (parent: CatalogDataset, _args: unknown, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
         if (!parent.sourceEndpointId) {
           return null;
         }
         const prisma = await getPrismaClient();
-        return prisma.metadataEndpoint.findUnique({ where: { id: parent.sourceEndpointId } });
+        const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: parent.sourceEndpointId } });
+        if (!endpoint || endpoint.projectId !== ctx.auth.projectId) {
+          return null;
+        }
+        return endpoint;
       },
     },
   };
+}
+
+function buildSampleEndpoints(projectId?: string): MetadataEndpointDescriptor[] {
+  const targetProject = projectId ?? (sampleMetadata.projectId as string | undefined) ?? DEFAULT_PROJECT_ID;
+  const now = new Date().toISOString();
+  return (sampleMetadata.endpoints ?? []).map((endpoint) => ({
+    id: endpoint.id,
+    sourceId: endpoint.sourceId ?? endpoint.id,
+    name: endpoint.name,
+    description: endpoint.description ?? undefined,
+    verb: ((endpoint.verb ?? "POST") as HttpVerb) || "POST",
+    url: endpoint.url,
+    authPolicy: endpoint.authPolicy ?? undefined,
+    projectId: targetProject,
+    domain: endpoint.domain ?? undefined,
+    labels: endpoint.labels ?? undefined,
+    config: endpoint.config ?? undefined,
+    detectedVersion: endpoint.detectedVersion ?? undefined,
+    versionHint: endpoint.versionHint ?? undefined,
+    capabilities: endpoint.capabilities ?? [],
+    createdAt: endpoint.createdAt ?? now,
+    updatedAt: endpoint.updatedAt ?? now,
+    deletedAt: null,
+    deletionReason: null,
+  }));
+}
+
+function buildSampleCatalogDatasets(projectId?: string): CatalogDataset[] {
+  const targetProject = projectId ?? (sampleMetadata.projectId as string | undefined) ?? DEFAULT_PROJECT_ID;
+  const now = new Date().toISOString();
+  const records: MetadataRecord<unknown>[] = (sampleMetadata.datasets ?? []).map((dataset) => {
+    const basePayload = { ...(dataset.payload as Record<string, unknown>) };
+    const metadataBlock = (basePayload["_metadata"] as Record<string, unknown> | undefined) ?? {};
+    const endpointId =
+      dataset.sourceEndpointId ?? (sampleMetadata.endpoints?.[0]?.id as string | undefined) ?? "seed-endpoint";
+    basePayload["metadata_endpoint_id"] = basePayload["metadata_endpoint_id"] ?? endpointId;
+    metadataBlock["source_endpoint_id"] = metadataBlock["source_endpoint_id"] ?? endpointId;
+    metadataBlock["source_id"] = metadataBlock["source_id"] ?? endpointId;
+    metadataBlock["collected_at"] = metadataBlock["collected_at"] ?? now;
+    basePayload["_metadata"] = metadataBlock;
+    return {
+      id: dataset.id,
+      projectId: dataset.projectId ?? targetProject,
+      domain: CATALOG_DATASET_DOMAIN,
+      labels: dataset.labels ?? [],
+      payload: basePayload,
+      createdAt: now,
+      updatedAt: now,
+    };
+  });
+  return records
+    .map(mapCatalogRecordToDataset)
+    .filter((dataset): dataset is CatalogDataset => Boolean(dataset));
 }
 
 function parseTemplateId(config?: Record<string, unknown> | null): string | null {
@@ -659,6 +798,28 @@ type CatalogDatasetProfile = {
   raw?: Record<string, unknown> | null;
 };
 
+type ResolverContext = {
+  auth: AuthContext;
+  userId: string | null;
+  bypassWrites?: boolean;
+};
+
+function enforceReadAccess(context: ResolverContext) {
+  if (!context.auth.tenantId || !context.auth.projectId) {
+    throw new Error("Missing tenant/project context");
+  }
+}
+
+function enforceWriteAccess(context: ResolverContext) {
+  enforceReadAccess(context);
+  if (context.bypassWrites) {
+    return;
+  }
+  if (!context.auth.roles.includes("writer") && !context.auth.roles.includes("admin")) {
+    throw new Error("Write access denied");
+  }
+}
+
 type GraphQLMetadataEndpointInput = {
   id?: string | null;
   sourceId?: string | null;
@@ -684,11 +845,6 @@ type MetadataCollectionRunFilter = {
 };
 
 type MetadataCollectionStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
-
-type ResolverContext = {
-  request: IncomingMessage;
-  userId: string | null;
-};
 
 function mapCatalogRecordToDataset(record: MetadataRecord<unknown>): CatalogDataset | null {
   const payload = normalizePayload(record.payload) ?? {};
