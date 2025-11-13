@@ -4,7 +4,7 @@ import sampleData from "../fixtures/sample-metadata.json";
 const CATALOG_DATASET_DOMAIN = process.env.METADATA_CATALOG_DOMAIN ?? "catalog.dataset";
 const DEFAULT_PROJECT_ID = process.env.METADATA_DEFAULT_PROJECT ?? "global";
 
-type SampleEndpoint = MetadataEndpointDescriptor & { verb?: string };
+type SampleEndpoint = Partial<Omit<MetadataEndpointDescriptor, "verb">> & { verb?: string };
 type SampleDataset = {
   id: string;
   labels?: string[];
@@ -31,11 +31,27 @@ export async function seedMetadataStoreIfEmpty(store: MetadataStore): Promise<vo
   const datasets: SampleDataset[] = sampleData.datasets ?? [];
   const defaultEndpointId = endpoints[0]?.id;
 
-  for (const endpoint of endpoints) {
+  for (const [index, endpoint] of endpoints.entries()) {
+    const fallbackId = endpoint.id ?? `sample-endpoint-${index + 1}`;
     const descriptor: MetadataEndpointDescriptor = {
-      ...endpoint,
-      projectId: endpoint.projectId ?? projectId,
+      id: fallbackId,
+      sourceId: endpoint.sourceId ?? fallbackId,
+      name: endpoint.name ?? `Sample Endpoint ${index + 1}`,
+      description: endpoint.description ?? undefined,
       verb: (endpoint.verb ?? "POST") as HttpVerb,
+      url: endpoint.url ?? "https://metadata-sample.example.com",
+      authPolicy: endpoint.authPolicy ?? undefined,
+      projectId: endpoint.projectId ?? projectId,
+      domain: endpoint.domain ?? undefined,
+      labels: endpoint.labels ?? undefined,
+      config: endpoint.config ?? undefined,
+      detectedVersion: endpoint.detectedVersion ?? undefined,
+      versionHint: endpoint.versionHint ?? undefined,
+      capabilities: endpoint.capabilities ?? [],
+      createdAt: endpoint.createdAt ?? now,
+      updatedAt: endpoint.updatedAt ?? now,
+      deletedAt: endpoint.deletedAt ?? null,
+      deletionReason: endpoint.deletionReason ?? null,
     };
     await store.registerEndpoint(descriptor);
   }
@@ -45,6 +61,10 @@ export async function seedMetadataStoreIfEmpty(store: MetadataStore): Promise<vo
     const basePayload = { ...dataset.payload };
     const existingMetadata = (basePayload["_metadata"] as Record<string, unknown> | undefined) ?? {};
     const collectedAt = (existingMetadata["collected_at"] as string | undefined) ?? now;
+    const labelSet = new Set(dataset.labels ?? sampleData.labels ?? []);
+    if (sourceEndpointId) {
+      labelSet.add(`endpoint:${sourceEndpointId}`);
+    }
     const payload = {
       ...basePayload,
       metadata_endpoint_id: basePayload["metadata_endpoint_id"] ?? sourceEndpointId,
@@ -59,7 +79,7 @@ export async function seedMetadataStoreIfEmpty(store: MetadataStore): Promise<vo
       id: dataset.id,
       projectId: dataset.projectId ?? projectId,
       domain: CATALOG_DATASET_DOMAIN,
-      labels: dataset.labels ?? sampleData.labels ?? [],
+      labels: Array.from(labelSet),
       payload,
     });
   }

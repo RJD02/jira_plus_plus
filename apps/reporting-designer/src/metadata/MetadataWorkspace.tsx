@@ -12,15 +12,19 @@ import {
 import { formatDateTime, formatPreviewValue, formatRelativeTime } from "../lib/format";
 import { fetchMetadataGraphQL } from "./api";
 import {
+  ENDPOINT_DATASETS_QUERY,
   METADATA_OVERVIEW_QUERY,
   PREVIEW_METADATA_DATASET_MUTATION,
   REGISTER_METADATA_ENDPOINT_MUTATION,
+  UPDATE_METADATA_ENDPOINT_MUTATION,
+  DELETE_METADATA_ENDPOINT_MUTATION,
   TEST_METADATA_ENDPOINT_MUTATION,
   TRIGGER_METADATA_COLLECTION_MUTATION,
 } from "./queries";
 import type {
   CatalogDataset,
   DatasetPreviewResult,
+  EndpointDatasetRecord,
   MetadataCollectionRunSummary,
   MetadataEndpointSummary,
   MetadataEndpointTemplate,
@@ -28,6 +32,7 @@ import type {
   MetadataEndpointTestResult,
 } from "./types";
 import { parseListInput, previewTableColumns } from "./utils";
+import type { Role } from "../auth/AuthProvider";
 
 type MetadataWorkspaceProps = {
   metadataEndpoint: string | null;
@@ -35,6 +40,8 @@ type MetadataWorkspaceProps = {
   selectedDatasetIds: string[];
   toggleDatasetSelection: (datasetId: string) => void;
   authToken?: string | null;
+  projectSlug?: string | null;
+  userRole: Role;
 };
 
 type MetadataSection = "catalog" | "endpoints" | "collections";
@@ -60,6 +67,47 @@ const templateFamilies: Array<{ id: TemplateFamily; label: string; description: 
   { id: "HTTP", label: "HTTP APIs", description: "SaaS systems like Jira, Confluence, ServiceNow." },
   { id: "STREAM", label: "Streaming", description: "Kafka, Confluent, and event hubs." },
 ];
+
+function extractTemplateIdFromConfig(config?: Record<string, unknown> | null): string | null {
+  if (!config || typeof config !== "object") {
+    return null;
+  }
+  const templateId = (config as Record<string, unknown>).templateId;
+  return typeof templateId === "string" ? templateId : null;
+}
+
+function parseTemplateParametersFromConfig(config?: Record<string, unknown> | null): Record<string, string> {
+  if (!config || typeof config !== "object") {
+    return {};
+  }
+  const parameters = (config as Record<string, unknown>).parameters;
+  if (!parameters || typeof parameters !== "object" || Array.isArray(parameters)) {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(parameters).map(([key, value]) => [key, value === undefined || value === null ? "" : String(value)]),
+  );
+}
+
+function buildTemplateValuesForTemplate(
+  template: MetadataEndpointTemplate | null,
+  parameters: Record<string, string>,
+): Record<string, string> {
+  if (!template) {
+    return {};
+  }
+  return template.fields.reduce<Record<string, string>>((acc, field) => {
+    acc[field.key] = parameters[field.key] ?? "";
+    return acc;
+  }, {});
+}
+
+function serializeTemplateConfigSignature(templateId: string | null, values: Record<string, string>) {
+  const sortedParameters = Object.entries(values)
+    .map(([key, value]) => [key, value ?? ""])
+    .sort(([a], [b]) => a.localeCompare(b));
+  return JSON.stringify({ templateId, parameters: sortedParameters });
+}
 
 const statusStyles: Record<
   MetadataCollectionRunSummary["status"],
@@ -93,6 +141,8 @@ export function MetadataWorkspace({
   selectedDatasetIds,
   toggleDatasetSelection,
   authToken,
+  projectSlug,
+  userRole,
 }: MetadataWorkspaceProps) {
   const [metadataEndpoints, setMetadataEndpoints] = useState<MetadataEndpointSummary[]>([]);
   const [metadataRuns, setMetadataRuns] = useState<MetadataCollectionRunSummary[]>([]);
@@ -100,6 +150,10 @@ export function MetadataWorkspace({
   const [metadataTemplateValues, setMetadataTemplateValues] = useState<Record<string, string>>({});
   const [metadataTemplateFamily, setMetadataTemplateFamily] = useState<TemplateFamily>("JDBC");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
+  const [metadataFormMode, setMetadataFormMode] = useState<"register" | "edit">("register");
+  const [metadataEditingEndpointId, setMetadataEditingEndpointId] = useState<string | null>(null);
+  const [metadataInitialConfigSignature, setMetadataInitialConfigSignature] = useState<string | null>(null);
+  const [metadataLastTestConfigSignature, setMetadataLastTestConfigSignature] = useState<string | null>(null);
   const [metadataEndpointName, setMetadataEndpointName] = useState("");
   const [metadataEndpointDescription, setMetadataEndpointDescription] = useState("");
   const [metadataEndpointLabels, setMetadataEndpointLabels] = useState("");
@@ -117,12 +171,31 @@ export function MetadataWorkspace({
   const [metadataRunOverrides, setMetadataRunOverrides] = useState<Record<string, string>>({});
   const [metadataTesting, setMetadataTesting] = useState(false);
   const [metadataTestResult, setMetadataTestResult] = useState<MetadataEndpointTestResult | null>(null);
+  const [metadataDeletingEndpointId, setMetadataDeletingEndpointId] = useState<string | null>(null);
   const [metadataCatalogPreviewRows, setMetadataCatalogPreviewRows] = useState<Record<string, DatasetPreviewResult>>({});
   const [metadataCatalogPreviewErrors, setMetadataCatalogPreviewErrors] = useState<Record<string, string>>({});
   const [metadataCatalogPreviewingId, setMetadataCatalogPreviewingId] = useState<string | null>(null);
   const [metadataEndpointDetailId, setMetadataEndpointDetailId] = useState<string | null>(null);
   const [metadataDatasetDetailId, setMetadataDatasetDetailId] = useState<string | null>(null);
   const [sectionNavCollapsed, setSectionNavCollapsed] = useState(false);
+  const [endpointDatasetRecords, setEndpointDatasetRecords] = useState<Record<string, EndpointDatasetRecord[]>>({});
+  const [endpointDatasetErrors, setEndpointDatasetErrors] = useState<Record<string, string>>({});
+  const [endpointDatasetLoading, setEndpointDatasetLoading] = useState<Record<string, boolean>>({});
+  const metadataRole = useMemo(() => {
+    if (userRole === "ADMIN") {
+      return "admin";
+    }
+    if (userRole === "MANAGER") {
+      return "editor";
+    }
+    return "viewer";
+  }, [userRole]);
+  const canModifyEndpoints = metadataRole !== "viewer";
+  const canDeleteEndpoints = metadataRole === "admin";
+  const metadataEditingEndpoint = useMemo(
+    () => (metadataEditingEndpointId ? metadataEndpoints.find((endpoint) => endpoint.id === metadataEditingEndpointId) ?? null : null),
+    [metadataEditingEndpointId, metadataEndpoints],
+  );
 
   const metadataEndpointLookup = useMemo(() => {
     const map = new Map<string, MetadataEndpointSummary>();
@@ -135,20 +208,6 @@ export function MetadataWorkspace({
     return map;
   }, [metadataEndpoints]);
 
-  const metadataDatasetsByEndpointId = useMemo(() => {
-    const map = new Map<string, CatalogDataset[]>();
-    catalogDatasets.forEach((dataset) => {
-      if (!dataset.sourceEndpointId) {
-        return;
-      }
-      const owner = metadataEndpointLookup.get(dataset.sourceEndpointId);
-      if (!owner) {
-        return;
-      }
-      map.set(owner.id, [...(map.get(owner.id) ?? []), dataset]);
-    });
-    return map;
-  }, [catalogDatasets, metadataEndpointLookup]);
 
   const metadataCatalogFilteredDatasets = useMemo(() => {
     const query = metadataCatalogSearch.trim().toLowerCase();
@@ -279,6 +338,16 @@ export function MetadataWorkspace({
 
   const handleOpenRegistration = useCallback(
     (templateId?: string, familyOverride?: TemplateFamily) => {
+      setMetadataFormMode("register");
+      setMetadataEditingEndpointId(null);
+      setMetadataInitialConfigSignature(null);
+      setMetadataLastTestConfigSignature(null);
+      setMetadataEndpointName("");
+      setMetadataEndpointDescription("");
+      setMetadataEndpointLabels("");
+      setMetadataTemplateValues({});
+      setMetadataTestResult(null);
+      setMetadataMutationError(null);
       let targetFamily = familyOverride ?? metadataTemplateFamily;
       let nextTemplateId = templateId ?? null;
       if (templateId) {
@@ -302,10 +371,58 @@ export function MetadataWorkspace({
     [metadataTemplateFamily, metadataTemplates, metadataTemplatesByFamily],
   );
 
+  const handleOpenEndpointEdit = useCallback(
+    (endpoint: MetadataEndpointSummary) => {
+      const templateIdFromConfig = extractTemplateIdFromConfig(endpoint.config);
+      let resolvedTemplate = templateIdFromConfig
+        ? metadataTemplates.find((template) => template.id === templateIdFromConfig) ?? null
+        : null;
+      if (!resolvedTemplate) {
+        resolvedTemplate = metadataTemplates[0] ?? null;
+      }
+      if (resolvedTemplate) {
+        if (resolvedTemplate.family !== metadataTemplateFamily) {
+          setMetadataTemplateFamily(resolvedTemplate.family);
+        }
+        setSelectedTemplateId(resolvedTemplate.id);
+        const initialValues = buildTemplateValuesForTemplate(
+          resolvedTemplate,
+          parseTemplateParametersFromConfig(endpoint.config ?? undefined),
+        );
+        setMetadataTemplateValues(initialValues);
+        const signature = serializeTemplateConfigSignature(resolvedTemplate.id, initialValues);
+        setMetadataInitialConfigSignature(signature);
+        setMetadataLastTestConfigSignature(signature);
+      } else {
+        setMetadataTemplateValues({});
+        setMetadataInitialConfigSignature(null);
+        setMetadataLastTestConfigSignature(null);
+      }
+      setMetadataFormMode("edit");
+      setMetadataEditingEndpointId(endpoint.id);
+      setMetadataEndpointName(endpoint.name);
+      setMetadataEndpointDescription(endpoint.description ?? "");
+      setMetadataEndpointLabels((endpoint.labels ?? []).join(", "));
+      setMetadataMutationError(null);
+      setMetadataTestResult(null);
+      setMetadataView("endpoint-register");
+      setMetadataEndpointDetailId(null);
+    },
+    [metadataTemplateFamily, metadataTemplates],
+  );
+
   const handleCloseRegistration = useCallback(() => {
     setMetadataView("overview");
     setMetadataMutationError(null);
     setMetadataTestResult(null);
+    setMetadataFormMode("register");
+    setMetadataEditingEndpointId(null);
+    setMetadataInitialConfigSignature(null);
+    setMetadataLastTestConfigSignature(null);
+  }, []);
+  const handleCloseEndpointDetail = useCallback(() => {
+    setMetadataEndpointDetailId(null);
+    setMetadataMutationError(null);
   }, []);
   const selectedTemplate = useMemo(() => {
     if (selectedTemplateId) {
@@ -316,6 +433,29 @@ export function MetadataWorkspace({
     }
     return filteredTemplates[0] ?? metadataTemplates[0] ?? null;
   }, [metadataTemplates, selectedTemplateId, filteredTemplates]);
+  const currentTemplateId = selectedTemplate?.id ?? null;
+  const isEditingEndpoint = metadataFormMode === "edit" && Boolean(metadataEditingEndpointId);
+  const currentConfigSignature = useMemo(
+    () => serializeTemplateConfigSignature(currentTemplateId, metadataTemplateValues),
+    [currentTemplateId, metadataTemplateValues],
+  );
+  const connectionChangedFromInitial = isEditingEndpoint && metadataInitialConfigSignature !== currentConfigSignature;
+  const requiresRetest =
+    isEditingEndpoint && connectionChangedFromInitial && metadataLastTestConfigSignature !== currentConfigSignature;
+  const formTitle = metadataFormMode === "edit" ? "Edit endpoint" : "Register endpoint";
+  const submitButtonLabel =
+    metadataFormMode === "edit"
+      ? metadataRegistering
+        ? "Saving…"
+        : "Save changes"
+      : metadataRegistering
+        ? "Registering…"
+        : "Register endpoint";
+  const submitDisabled =
+    !canModifyEndpoints ||
+    metadataRegistering ||
+    (metadataFormMode === "edit" ? requiresRetest : !metadataTestResult?.ok);
+  const showRetestWarning = metadataFormMode === "edit" && requiresRetest;
 
   useEffect(() => {
     if (metadataView !== "endpoint-register") {
@@ -417,49 +557,78 @@ export function MetadataWorkspace({
     [authToken, metadataEndpoint],
   );
 
-  const handleRegisterMetadataEndpoint = useCallback(
+  const handleSubmitMetadataEndpoint = useCallback(
     async (event: FormEvent<HTMLFormElement>) => {
       event.preventDefault();
       if (!selectedTemplate) {
-        setMetadataMutationError("Select an endpoint template before registering.");
+        setMetadataMutationError("Select an endpoint template before continuing.");
         return;
       }
       if (!metadataEndpoint) {
-        setMetadataMutationError("Configure VITE_METADATA_GRAPHQL_ENDPOINT to register endpoints.");
+        setMetadataMutationError("Configure VITE_METADATA_GRAPHQL_ENDPOINT to manage endpoints.");
+        return;
+      }
+      if (!canModifyEndpoints) {
+        setMetadataMutationError("You do not have permission to modify endpoints.");
         return;
       }
       setMetadataRegistering(true);
       setMetadataMutationError(null);
       try {
         const userLabels = parseListInput(metadataEndpointLabels);
-        const labels = Array.from(new Set([...(selectedTemplate.defaultLabels ?? []), ...userLabels]));
+        const labels =
+          metadataFormMode === "register"
+            ? Array.from(new Set([...(selectedTemplate.defaultLabels ?? []), ...userLabels]))
+            : userLabels;
         const configPayload: Record<string, unknown> = {
           templateId: selectedTemplate.id,
           parameters: metadataTemplateValues,
         };
-        await fetchMetadataGraphQL(
-          metadataEndpoint,
-          REGISTER_METADATA_ENDPOINT_MUTATION,
-          {
-            input: {
-              name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
-              description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
-              verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
-              url: null,
-              domain: selectedTemplate.domain ?? undefined,
-              labels: labels.length ? labels : undefined,
-              config: configPayload,
+        if (metadataFormMode === "edit" && metadataEditingEndpointId) {
+          await fetchMetadataGraphQL(
+            metadataEndpoint,
+            UPDATE_METADATA_ENDPOINT_MUTATION,
+            {
+              id: metadataEditingEndpointId,
+              patch: {
+                name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
+                description: metadataEndpointDescription.trim() || null,
+                labels,
+                config: configPayload,
+              },
             },
-          },
-          undefined,
-          { token: authToken ?? undefined },
-        );
-        setMetadataTemplateValues({});
-        setMetadataEndpointName("");
-        setMetadataEndpointDescription("");
-        setMetadataEndpointLabels("");
-        setMetadataTestResult(null);
-        refreshMetadataWorkspace();
+            undefined,
+            { token: authToken ?? undefined },
+          );
+          refreshMetadataWorkspace();
+          handleCloseRegistration();
+        } else {
+          await fetchMetadataGraphQL(
+            metadataEndpoint,
+            REGISTER_METADATA_ENDPOINT_MUTATION,
+            {
+              input: {
+                projectSlug: projectSlug ?? undefined,
+                name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
+                description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
+                verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
+                url: null,
+                domain: selectedTemplate.domain ?? undefined,
+                labels: labels.length ? labels : undefined,
+                config: configPayload,
+                capabilities: selectedTemplate.capabilities?.map((capability) => capability.key) ?? undefined,
+              },
+            },
+            undefined,
+            { token: authToken ?? undefined },
+          );
+          setMetadataTemplateValues({});
+          setMetadataEndpointName("");
+          setMetadataEndpointDescription("");
+          setMetadataEndpointLabels("");
+          setMetadataTestResult(null);
+          refreshMetadataWorkspace();
+        }
       } catch (error) {
         setMetadataMutationError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -468,11 +637,16 @@ export function MetadataWorkspace({
     },
     [
       authToken,
+      canModifyEndpoints,
+      handleCloseRegistration,
+      metadataEditingEndpointId,
       metadataEndpoint,
       metadataEndpointDescription,
       metadataEndpointLabels,
       metadataEndpointName,
+      metadataFormMode,
       metadataTemplateValues,
+      projectSlug,
       refreshMetadataWorkspace,
       selectedTemplate,
     ],
@@ -490,55 +664,53 @@ export function MetadataWorkspace({
     setMetadataTesting(true);
     setMetadataTestResult(null);
     try {
-      const userLabels = parseListInput(metadataEndpointLabels);
-      const configPayload: Record<string, unknown> = {
-        templateId: selectedTemplate.id,
-        parameters: metadataTemplateValues,
-      };
       const payload = await fetchMetadataGraphQL<{
-        testMetadataEndpoint: MetadataEndpointTestResult;
+        testEndpoint: MetadataEndpointTestResult;
       }>(
         metadataEndpoint,
         TEST_METADATA_ENDPOINT_MUTATION,
         {
           input: {
-            name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
-            description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
-            verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
-            url: null,
-            domain: selectedTemplate.domain ?? undefined,
-            labels: userLabels.length ? userLabels : undefined,
-            config: configPayload,
+            templateId: selectedTemplate.id,
+            type: selectedTemplate.family.toLowerCase(),
+            connection: metadataTemplateValues,
+            capabilities: selectedTemplate.capabilities?.map((capability) => capability.key),
           },
         },
         undefined,
         { token: authToken ?? undefined },
       );
-      const result = payload.testMetadataEndpoint;
+      const result = payload.testEndpoint;
       setMetadataTestResult(result);
+      if (result.ok) {
+        setMetadataLastTestConfigSignature(
+          serializeTemplateConfigSignature(selectedTemplate!.id, metadataTemplateValues),
+        );
+      }
     } catch (error) {
       setMetadataTestResult({
-        success: false,
-        message: error instanceof Error ? error.message : String(error),
-        capabilities: [],
+        ok: false,
+        diagnostics: [
+          {
+            level: "ERROR",
+            code: "E_CONN_TEST_FAILED",
+            message: error instanceof Error ? error.message : String(error),
+          },
+        ],
       });
     } finally {
       setMetadataTesting(false);
     }
-  }, [
-    authToken,
-    metadataEndpoint,
-    metadataEndpointDescription,
-    metadataEndpointLabels,
-    metadataEndpointName,
-    metadataTemplateValues,
-    selectedTemplate,
-  ]);
+  }, [authToken, metadataEndpoint, metadataEndpointDescription, metadataEndpointLabels, metadataEndpointName, metadataTemplateValues, selectedTemplate]);
 
   const handleTriggerMetadataRun = useCallback(
     async (endpointId: string) => {
       if (!metadataEndpoint) {
         setMetadataMutationError("Configure VITE_METADATA_GRAPHQL_ENDPOINT to trigger collections.");
+        return;
+      }
+      if (!canModifyEndpoints) {
+        setMetadataMutationError("You do not have permission to trigger collections.");
         return;
       }
       const targetEndpoint = metadataEndpoints.find((endpoint) => endpoint.id === endpointId);
@@ -554,7 +726,7 @@ export function MetadataWorkspace({
       setMetadataMutationError(null);
       try {
         const override = metadataRunOverrides[endpointId];
-        const schemas = override
+        const schemaOverride = override
           ? override
               .split(",")
               .map((schema) => schema.trim())
@@ -564,10 +736,8 @@ export function MetadataWorkspace({
           metadataEndpoint,
           TRIGGER_METADATA_COLLECTION_MUTATION,
           {
-            input: {
-              endpointId,
-              schemas,
-            },
+            endpointId,
+            schemaOverride,
           },
           undefined,
           { token: authToken ?? undefined },
@@ -578,6 +748,93 @@ export function MetadataWorkspace({
       }
     },
     [authToken, metadataEndpoint, metadataEndpoints, metadataRunOverrides, refreshMetadataWorkspace],
+  );
+
+  const handleDeleteMetadataEndpoint = useCallback(
+    async (endpoint: MetadataEndpointSummary) => {
+      if (!canDeleteEndpoints) {
+        setMetadataMutationError("You do not have permission to delete endpoints.");
+        return;
+      }
+      if (!metadataEndpoint) {
+        setMetadataMutationError("Configure VITE_METADATA_GRAPHQL_ENDPOINT to delete endpoints.");
+        return;
+      }
+      if (typeof window !== "undefined") {
+        const confirmDelete = window.confirm(
+          `Delete “${endpoint.name}”? Metadata collections and their datasets will no longer receive updates.`,
+        );
+        if (!confirmDelete) {
+          return;
+        }
+      }
+      setMetadataDeletingEndpointId(endpoint.id);
+      setMetadataMutationError(null);
+      try {
+        await fetchMetadataGraphQL(
+          metadataEndpoint,
+          DELETE_METADATA_ENDPOINT_MUTATION,
+          { id: endpoint.id },
+          undefined,
+          { token: authToken ?? undefined },
+        );
+        if (metadataEditingEndpointId === endpoint.id) {
+          handleCloseRegistration();
+        }
+        if (metadataEndpointDetailId === endpoint.id) {
+          setMetadataEndpointDetailId(null);
+        }
+        refreshMetadataWorkspace();
+      } catch (error) {
+        setMetadataMutationError(error instanceof Error ? error.message : String(error));
+      } finally {
+        setMetadataDeletingEndpointId((prev) => (prev === endpoint.id ? null : prev));
+      }
+    },
+    [
+      authToken,
+      canDeleteEndpoints,
+      handleCloseRegistration,
+      metadataEditingEndpointId,
+      metadataEndpoint,
+      metadataEndpointDetailId,
+      refreshMetadataWorkspace,
+    ],
+  );
+
+  const loadEndpointDatasets = useCallback(
+    async (endpointId: string, options?: { force?: boolean }) => {
+      if (!metadataEndpoint || !authToken) {
+        return;
+      }
+      if (!options?.force && endpointDatasetRecords[endpointId]) {
+        return;
+      }
+      setEndpointDatasetLoading((prev) => ({ ...prev, [endpointId]: true }));
+      try {
+        const payload = await fetchMetadataGraphQL<{ endpointDatasets: EndpointDatasetRecord[] }>(
+          metadataEndpoint,
+          ENDPOINT_DATASETS_QUERY,
+          { endpointId },
+          undefined,
+          { token: authToken },
+        );
+        setEndpointDatasetRecords((prev) => ({ ...prev, [endpointId]: payload.endpointDatasets ?? [] }));
+        setEndpointDatasetErrors((prev) => {
+          const next = { ...prev };
+          delete next[endpointId];
+          return next;
+        });
+      } catch (error) {
+        setEndpointDatasetErrors((prev) => ({
+          ...prev,
+          [endpointId]: error instanceof Error ? error.message : String(error),
+        }));
+      } finally {
+        setEndpointDatasetLoading((prev) => ({ ...prev, [endpointId]: false }));
+      }
+    },
+    [authToken, endpointDatasetRecords, metadataEndpoint],
   );
 
   useEffect(() => {
@@ -636,6 +893,16 @@ export function MetadataWorkspace({
   }, [metadataTemplates]);
 
   useEffect(() => {
+    if (!metadataEndpointDetailId) {
+      return;
+    }
+    if (endpointDatasetRecords[metadataEndpointDetailId]) {
+      return;
+    }
+    void loadEndpointDatasets(metadataEndpointDetailId);
+  }, [metadataEndpointDetailId, endpointDatasetRecords, loadEndpointDatasets]);
+
+  useEffect(() => {
     if (!filteredTemplates.length) {
       return;
     }
@@ -661,18 +928,24 @@ export function MetadataWorkspace({
       setMetadataError(null);
       try {
         const data = await fetchMetadataGraphQL<{
-          metadataEndpoints: MetadataEndpointSummary[];
+          endpoints: MetadataEndpointSummary[];
           metadataCollectionRuns: MetadataCollectionRunSummary[];
-          metadataEndpointTemplates: MetadataEndpointTemplate[];
-        }>(metadataEndpoint, METADATA_OVERVIEW_QUERY, { runsLimit: 30 }, controller.signal, {
-          token: authToken ?? undefined,
-        });
+          endpointTemplates: MetadataEndpointTemplate[];
+        }>(
+          metadataEndpoint,
+          METADATA_OVERVIEW_QUERY,
+          { projectSlug: projectSlug ?? undefined, runsLimit: 30 },
+          controller.signal,
+          {
+            token: authToken ?? undefined,
+          },
+        );
         if (controller.signal.aborted) {
           return;
         }
-        setMetadataEndpoints(data.metadataEndpoints ?? []);
+        setMetadataEndpoints(data.endpoints ?? []);
         setMetadataRuns(data.metadataCollectionRuns ?? []);
-        setMetadataTemplates(data.metadataEndpointTemplates ?? []);
+        setMetadataTemplates(data.endpointTemplates ?? []);
       } catch (error) {
         if (!controller.signal.aborted) {
           setMetadataError(error instanceof Error ? error.message : String(error));
@@ -1124,17 +1397,25 @@ export function MetadataWorkspace({
         <section className="space-y-4 rounded-2xl border border-slate-200 bg-white p-5 shadow-sm dark:border-slate-800 dark:bg-slate-900">
           {!selectedTemplate ? (
             <p className="text-sm text-slate-500">Select a template to configure connection details.</p>
-          ) : (
-            <>
-              {metadataMutationError ? (
-                <p className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200">
-                  {metadataMutationError}
-                </p>
-              ) : null}
-              <form className="space-y-4" onSubmit={handleRegisterMetadataEndpoint}>
-                <div className="grid gap-3 md:grid-cols-2">
-                  <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
-                    Endpoint name
+              ) : (
+                <>
+                  <div className="space-y-1">
+                    <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500">{formTitle}</p>
+                    <p className="text-sm text-slate-500">
+                      {metadataFormMode === "edit"
+                        ? "Update the endpoint details and re-test the connection whenever credentials change."
+                        : "Select a template, provide connection parameters, and register the endpoint after a passing test."}
+                    </p>
+                  </div>
+                  {metadataMutationError ? (
+                    <p className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200">
+                      {metadataMutationError}
+                    </p>
+                  ) : null}
+                  <form className="space-y-4" onSubmit={handleSubmitMetadataEndpoint}>
+                    <div className="grid gap-3 md:grid-cols-2">
+                      <label className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+                        Endpoint name
                     <input
                       value={metadataEndpointName}
                       onChange={(event) => setMetadataEndpointName(event.target.value)}
@@ -1254,53 +1535,53 @@ export function MetadataWorkspace({
                       </div>
                     );
                   })}
-                </div>
-                <div className="flex flex-wrap gap-3">
-                  <button
-                    type="button"
-                    onClick={handleTestMetadataEndpoint}
-                    disabled={metadataRegistering || metadataTesting}
-                    className="flex-1 rounded-full border border-slate-300 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-900 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-600 dark:text-slate-200"
-                  >
-                    {metadataTesting ? "Testing…" : "Test connection"}
-                  </button>
-                  <button
-                    type="submit"
-                    disabled={metadataRegistering}
-                    className="flex-1 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-emerald-500 dark:hover:bg-emerald-400"
-                  >
-                    {metadataRegistering ? "Registering…" : "Register endpoint"}
-                  </button>
-                </div>
-                {metadataTestResult ? (
-                  <div
+                    </div>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="button"
+                        onClick={handleTestMetadataEndpoint}
+                        disabled={!canModifyEndpoints || metadataRegistering || metadataTesting}
+                        className="flex-1 rounded-full border border-slate-300 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-900 hover:text-slate-900 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-600 dark:text-slate-200"
+                      >
+                        {metadataTesting ? "Testing…" : "Test connection"}
+                      </button>
+                      <button
+                        type="submit"
+                        disabled={submitDisabled}
+                        className="flex-1 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:bg-slate-400 dark:bg-emerald-500 dark:hover:bg-emerald-400"
+                      >
+                        {submitButtonLabel}
+                      </button>
+                    </div>
+                    {showRetestWarning ? (
+                      <p className="text-xs text-amber-600">
+                        Connection parameters changed. Re-run “Test connection” before saving.
+                      </p>
+                    ) : null}
+                    {!canModifyEndpoints ? (
+                      <p className="text-xs text-slate-500">Viewer access cannot register endpoints.</p>
+                    ) : null}
+                    {metadataTestResult ? (
+                      <div
+                    data-testid="metadata-test-result"
                     className={`rounded-2xl border px-3 py-3 text-xs ${
-                      metadataTestResult.success
+                      metadataTestResult.ok
                         ? "border-emerald-200 bg-emerald-50 text-emerald-800 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-200"
                         : "border-rose-200 bg-rose-50 text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
                     }`}
                   >
                     <p className="text-sm font-semibold">
-                      {metadataTestResult.message ??
-                        (metadataTestResult.success ? "Connection parameters validated." : "Connection test failed.")}
+                      {metadataTestResult.ok ? "Connection parameters validated." : "Connection test reported issues."}
                     </p>
-                    {metadataTestResult.detectedVersion ? (
-                      <p className="mt-1">Detected version · {metadataTestResult.detectedVersion}</p>
-                    ) : null}
-                    {metadataTestResult.capabilities && metadataTestResult.capabilities.length ? (
-                      <div className="mt-2 flex flex-wrap gap-2">
-                        {metadataTestResult.capabilities.map((capability) => (
-                          <span key={capability} className="rounded-full border border-current px-2 py-0.5 text-[10px] uppercase tracking-[0.3em]">
-                            {capability}
-                          </span>
-                        ))}
+                    {metadataTestResult.diagnostics.map((diagnostic, index) => (
+                      <div key={`${diagnostic.code}-${index}`} className="mt-2">
+                        <p className="text-xs font-semibold uppercase tracking-[0.3em]">
+                          {diagnostic.code} · {diagnostic.level}
+                        </p>
+                        <p className="text-sm">{diagnostic.message}</p>
+                        {diagnostic.hint ? <p className="text-[11px] text-slate-700">{diagnostic.hint}</p> : null}
                       </div>
-                    ) : null}
-                    {metadataTestResult.details ? (
-                      <pre className="mt-2 max-h-48 overflow-auto rounded-xl bg-white/30 p-2 text-[11px] text-current dark:bg-black/20">
-                        {JSON.stringify(metadataTestResult.details, null, 2)}
-                      </pre>
-                    ) : null}
+                    ))}
                   </div>
                 ) : null}
               </form>
@@ -1314,7 +1595,11 @@ export function MetadataWorkspace({
   const renderEndpointCardStatus = (run: MetadataCollectionRunSummary | undefined) => {
     if (!run) {
       return (
-        <span className="inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500 dark:border-slate-600">
+        <span
+          data-testid="metadata-endpoint-status"
+          data-status="none"
+          className="inline-flex items-center gap-2 rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500 dark:border-slate-600"
+        >
           No runs
         </span>
       );
@@ -1322,6 +1607,8 @@ export function MetadataWorkspace({
     const style = statusStyles[run.status];
     return (
       <span
+        data-testid="metadata-endpoint-status"
+        data-status={run.status.toLowerCase()}
         className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] ${style.badge}`}
         title={run.error ?? undefined}
       >
@@ -1346,7 +1633,9 @@ export function MetadataWorkspace({
             <button
               type="button"
               onClick={() => handleOpenRegistration()}
-              className="rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white shadow hover:bg-slate-800 dark:bg-emerald-500 dark:text-slate-900"
+              className="rounded-full bg-slate-900 px-4 py-2 text-xs font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-emerald-500 dark:text-slate-900"
+              disabled={!canModifyEndpoints}
+              title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
             >
               + Register endpoint
             </button>
@@ -1362,7 +1651,9 @@ export function MetadataWorkspace({
                   key={family.id}
                   type="button"
                   onClick={() => handleOpenRegistration(undefined, family.id)}
-                  className="rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-slate-900 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  className="rounded-2xl border border-slate-200 px-4 py-3 text-left transition hover:border-slate-900 disabled:cursor-not-allowed disabled:opacity-60 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-200"
+                  disabled={!canModifyEndpoints}
+                  title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
                 >
                   <p className="text-base font-semibold">{family.label}</p>
                   <p className="text-xs uppercase tracking-[0.3em] text-slate-400">{templateCount} templates</p>
@@ -1386,9 +1677,14 @@ export function MetadataWorkspace({
             !hasDeclaredCapabilities || declaredCapabilities.includes("metadata");
           const supportsPreviewCapability =
             !hasDeclaredCapabilities || declaredCapabilities.includes("preview");
-          const collectionBlockedReason = hasDeclaredCapabilities && !supportsMetadataCapability
-            ? "Metadata collections disabled: this endpoint is missing the \"metadata\" capability."
-            : null;
+          const capabilityBlockedReason =
+            hasDeclaredCapabilities && !supportsMetadataCapability
+              ? "Metadata collections disabled: this endpoint is missing the \"metadata\" capability."
+              : null;
+          const triggerBlockedReason = !canModifyEndpoints
+            ? "Viewer access cannot trigger collections."
+            : capabilityBlockedReason;
+          const canTriggerCollection = !triggerBlockedReason;
           const previewBlockedReason = hasDeclaredCapabilities && !supportsPreviewCapability
             ? "Dataset previews disabled: this endpoint is missing the \"preview\" capability."
             : null;
@@ -1444,9 +1740,9 @@ export function MetadataWorkspace({
                   ))}
                 </div>
               ) : null}
-              {collectionBlockedReason ? (
+              {capabilityBlockedReason ? (
                 <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
-                  {collectionBlockedReason}
+                  {capabilityBlockedReason}
                 </div>
               ) : null}
               {previewBlockedReason ? (
@@ -1470,13 +1766,13 @@ export function MetadataWorkspace({
                 <button
                   type="button"
                   onClick={() => handleTriggerMetadataRun(endpoint.id)}
-                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.3em] transition ${
-                    supportsMetadataCapability
+                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.3em] transition disabled:cursor-not-allowed disabled:opacity-60 ${
+                    canTriggerCollection
                       ? "border-slate-300 text-slate-600 hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-200"
                       : "border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-600"
                   }`}
-                  disabled={!supportsMetadataCapability}
-                  title={collectionBlockedReason ?? undefined}
+                  disabled={!canTriggerCollection}
+                  title={triggerBlockedReason ?? undefined}
                 >
                   <LuSquarePlus className="h-4 w-4" />
                   Trigger collection
@@ -1552,9 +1848,13 @@ export function MetadataWorkspace({
     }
   };
 
-  const endpointDatasets = metadataEndpointDetail
-    ? metadataDatasetsByEndpointId.get(metadataEndpointDetail.id) ?? []
-    : [];
+  const endpointDatasets = metadataEndpointDetail ? endpointDatasetRecords[metadataEndpointDetail.id] ?? [] : [];
+  const endpointDatasetsError = metadataEndpointDetail ? endpointDatasetErrors[metadataEndpointDetail.id] ?? null : null;
+  const isEndpointDatasetsLoading = metadataEndpointDetail
+    ? Boolean(endpointDatasetLoading[metadataEndpointDetail.id])
+    : false;
+  const detailHasRunningRun = metadataEndpointDetail?.runs.some((run) => run.status === "RUNNING") ?? false;
+  const showDetailMutationError = metadataView === "overview" && Boolean(metadataMutationError);
 
   return (
     <>
@@ -1639,14 +1939,16 @@ export function MetadataWorkspace({
               >
                 <LuRefreshCcw className="h-4 w-4" /> Refresh
               </button>
-              <button
-                type="button"
-                onClick={() => handleOpenRegistration()}
-                className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 dark:bg-emerald-500 dark:text-slate-900"
-                data-testid="metadata-register-open"
-              >
-                <LuSquarePlus className="h-4 w-4" /> Register endpoint
-              </button>
+            <button
+              type="button"
+              onClick={() => handleOpenRegistration()}
+              className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-emerald-500 dark:text-slate-900"
+              data-testid="metadata-register-open"
+              disabled={!canModifyEndpoints}
+              title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
+            >
+              <LuSquarePlus className="h-4 w-4" /> Register endpoint
+            </button>
             </div>
           )}
         </header>
@@ -1669,8 +1971,10 @@ export function MetadataWorkspace({
             <button
               type="button"
               onClick={() => handleOpenRegistration()}
-              className="ml-auto rounded-full bg-slate-900 px-4 py-1.5 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow hover:bg-slate-800 dark:bg-emerald-500 dark:text-slate-900"
+              className="ml-auto rounded-full bg-slate-900 px-4 py-1.5 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-emerald-500 dark:text-slate-900"
               data-testid="metadata-register-open"
+              disabled={!canModifyEndpoints}
+              title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
             >
               Register endpoint
             </button>
@@ -1762,7 +2066,7 @@ export function MetadataWorkspace({
       ) : null}
       {metadataEndpointDetail ? (
         <div className="fixed inset-0 z-40 flex justify-end">
-          <div className="absolute inset-0 bg-slate-900/40" onClick={() => setMetadataEndpointDetailId(null)} />
+          <div className="absolute inset-0 bg-slate-900/40" onClick={handleCloseEndpointDetail} />
           <section
             className="relative flex h-full w-full max-w-xl flex-col border-l border-slate-200 bg-white px-6 py-6 shadow-2xl dark:border-slate-800 dark:bg-slate-950"
             data-testid="metadata-endpoint-detail"
@@ -1770,17 +2074,53 @@ export function MetadataWorkspace({
             <div className="flex items-center justify-between border-b border-slate-200 pb-4 dark:border-slate-800">
               <div>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.35em] text-slate-500">Endpoint detail</p>
-                <p className="text-sm text-slate-500">{metadataEndpointDetail.description ?? metadataEndpointDetail.url}</p>
+                <p className="text-base font-semibold text-slate-900 dark:text-white">{metadataEndpointDetail.name}</p>
+                <p className="text-xs uppercase tracking-[0.3em] text-slate-500">{metadataEndpointDetail.id}</p>
               </div>
-              <button
-                type="button"
-                onClick={() => setMetadataEndpointDetailId(null)}
-                className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-500 dark:border-slate-700"
-              >
-                Close
-              </button>
+              <div className="flex items-center gap-2">
+                {canModifyEndpoints ? (
+                  <button
+                    type="button"
+                    onClick={() => handleOpenEndpointEdit(metadataEndpointDetail)}
+                    className="rounded-full border border-slate-300 px-3 py-1 text-sm text-slate-600 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-300"
+                  >
+                    Edit
+                  </button>
+                ) : null}
+                {canDeleteEndpoints ? (
+                  <button
+                    type="button"
+                    onClick={() => handleDeleteMetadataEndpoint(metadataEndpointDetail)}
+                    disabled={metadataDeletingEndpointId === metadataEndpointDetail.id || detailHasRunningRun}
+                    title={
+                      detailHasRunningRun
+                        ? "Cannot delete while a collection is running."
+                        : undefined
+                    }
+                    className="rounded-full border border-rose-200 px-3 py-1 text-sm text-rose-600 transition hover:border-rose-500 hover:text-rose-800 disabled:cursor-not-allowed disabled:opacity-60 dark:border-rose-500/40 dark:text-rose-200"
+                  >
+                    {metadataDeletingEndpointId === metadataEndpointDetail.id ? "Deleting…" : "Delete"}
+                  </button>
+                ) : null}
+                <button
+                  type="button"
+                  onClick={handleCloseEndpointDetail}
+                  className="rounded-full border border-slate-200 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.25em] text-slate-500 dark:border-slate-700"
+                >
+                  Close
+                </button>
+              </div>
             </div>
+            {showDetailMutationError ? (
+              <p className="mt-3 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200">
+                {metadataMutationError}
+              </p>
+            ) : null}
             <div className="scrollbar-thin flex-1 space-y-4 overflow-y-auto py-4 pr-1 text-sm text-slate-600 dark:text-slate-300">
+              <div>
+                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Description</p>
+                <p className="mt-1 text-sm">{metadataEndpointDetail.description ?? "No description provided yet."}</p>
+              </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Connection</p>
                 <p className="mt-1 break-all font-mono text-xs text-slate-500 dark:text-slate-400">{metadataEndpointDetail.url}</p>
@@ -1809,18 +2149,61 @@ export function MetadataWorkspace({
                   </div>
                 </div>
               ) : null}
-              <div>
-                <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Datasets ({endpointDatasets.length})</p>
-                {endpointDatasets.length === 0 ? (
-                  <p className="mt-2 text-xs text-slate-500">No catalog entries linked yet.</p>
+              <div data-testid="metadata-endpoint-datasets">
+                <div className="flex items-center justify-between gap-3">
+                  <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">
+                    Datasets ({endpointDatasets.length})
+                  </p>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      metadataEndpointDetail?.id && loadEndpointDatasets(metadataEndpointDetail.id, { force: true })
+                    }
+                    className="inline-flex items-center gap-1 rounded-full border border-slate-200 px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.3em] text-slate-500 transition hover:border-slate-900 hover:text-slate-900 disabled:opacity-50 dark:border-slate-700 dark:text-slate-300"
+                    disabled={isEndpointDatasetsLoading}
+                    data-testid="metadata-endpoint-datasets-refresh"
+                  >
+                    <LuRefreshCcw className="h-3 w-3" />
+                    Refresh
+                  </button>
+                </div>
+                {endpointDatasetsError ? (
+                  <p
+                    className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-500/40 dark:bg-rose-500/10 dark:text-rose-200"
+                    data-testid="metadata-endpoint-datasets-error"
+                  >
+                    {endpointDatasetsError}
+                  </p>
+                ) : isEndpointDatasetsLoading ? (
+                  <p className="mt-2 text-xs text-slate-500" data-testid="metadata-endpoint-datasets-loading">
+                    Loading datasets…
+                  </p>
+                ) : endpointDatasets.length === 0 ? (
+                  <p className="mt-2 text-xs text-slate-500" data-testid="metadata-endpoint-datasets-empty">
+                    No catalog entries linked yet. Tag catalog records with <code>endpoint:{metadataEndpointDetail.id}</code> once
+                    collections complete.
+                  </p>
                 ) : (
-                  <ul className="mt-2 space-y-2">
-                    {endpointDatasets.map((dataset) => (
-                      <li key={dataset.id} className="rounded-2xl border border-slate-200 px-3 py-2 dark:border-slate-700">
-                        <p className="text-sm font-semibold">{dataset.displayName}</p>
-                        <p className="text-[11px] uppercase tracking-[0.3em] text-slate-400">{dataset.id}</p>
-                      </li>
-                    ))}
+                  <ul className="mt-2 space-y-2" data-testid="metadata-endpoint-datasets-list">
+                    {endpointDatasets.map((dataset) => {
+                      const datasetPayload =
+                        (dataset.payload?.dataset as { displayName?: string; description?: string } | undefined) ?? {};
+                      const displayName = datasetPayload.displayName ?? dataset.id;
+                      const description = datasetPayload.description ?? "No description provided.";
+                      return (
+                        <li
+                          key={dataset.id}
+                          className="rounded-2xl border border-slate-200 px-3 py-2 dark:border-slate-700"
+                          data-testid="metadata-endpoint-dataset-row"
+                        >
+                          <p className="text-sm font-semibold text-slate-900 dark:text-white">{displayName}</p>
+                          <p className="text-xs text-slate-500">{description}</p>
+                          <div className="mt-2 text-[11px] uppercase tracking-[0.3em] text-slate-400">
+                            Updated · {formatDateTime(dataset.updatedAt)}
+                          </div>
+                        </li>
+                      );
+                    })}
                   </ul>
                 )}
               </div>

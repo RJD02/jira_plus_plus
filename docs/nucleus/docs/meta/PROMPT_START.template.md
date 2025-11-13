@@ -1,36 +1,34 @@
-# Codex Start Prompt — {{slug}} (canonical)
-
-Load role from docs/meta/AGENT_CODEX.md.
+You are AGENT_CODEX as defined in docs/meta/AGENT_CODEX.md.
 
 Feature slug: {{slug}}
 
-Read these files now:
-- intents/{{slug}}/INTENT.md
-- intents/{{slug}}/SPEC.md
-- intents/{{slug}}/ACCEPTANCE.md
-- docs/meta/AGENT_CODEX.md
-- runs/{{slug}}/RUNCARD.md  # treat as the run’s authoritative checklist
-- runs/{{slug}}/{PLAN.md,LOG.md,QUESTIONS.md,DECISIONS.md,TODO.md}  # create if missing
+Load and follow:
+- docs/meta/AGENT_CODEX.md            # global engine rules (Boot, Loop, Guardrails bullets, Stop, Resume)
+- runs/{{slug}}/RUNCARD.md            # feature-specific workflow per RUN_CARD schema (v1)
+- intents/{{slug}}/INTENT.md          # what + context
+- intents/{{slug}}/SPEC.md            # domain logic
+- intents/{{slug}}/ACCEPTANCE.md      # definition of DONE (may change between runs)
+- runs/{{slug}}/{PLAN.md,LOG.md,TODO.md,QUESTIONS.md,DECISIONS.md}   # run state
 
-Execute per AGENT_CODEX loop and RUNCARD tasks.
+Your behavior:
+- Let AGENT_CODEX.md determine Boot / Loop / Stop / Resume semantics.
+- Let RUNCARD.md determine all feature-specific execution steps:
+  - INPUTS / OUTPUTS
+  - LOOP / HEARTBEAT
+  - STOP WHEN
+  - POST-RUN actions
+  - GUARDRAILS (custom blocks, ci-check budget, fail-closed)
+  - TASKS FOR THIS RUN
+  - ENV / NOTES
+  - UI TESTING CONTRACT (browser-based tests; API-only does NOT satisfy e2e-ui acceptance)
+- Treat INTENT.md / SPEC.md / ACCEPTANCE.md as authoritative requirements.
+- Treat PLAN.md / LOG.md / TODO.md / QUESTIONS.md / DECISIONS.md as the current state.
+- TODO.md may contain:
+  • small items (≤15 min, no contract/schema change) → execute  
+  • large items → record proposal in QUESTIONS.md and STOP
 
-Start by:
-1) Updating runs/{{slug}}/PLAN.md with the first 3–5 sub-goals.
-2) Appending a heartbeat to runs/{{slug}}/LOG.md: {timestamp, done, next, risks}.
-3) Running the fast path (`make ci-check`). If absent, scaffold minimally to satisfy ACCEPTANCE.md.
+Re-parse ACCEPTANCE.md and TODO.md on every start or resume.
 
-Loop: Plan → Implement → Test → Patch → Heartbeat (every 10–15 min; ≤ ~150 LOC/commit; reference AC#).
+Do not ask for confirmation unless AGENT_CODEX.md or RUNCARD.md is missing or inconsistent.
 
-Stop when:
-- All items in intents/{{slug}}/ACCEPTANCE.md are objectively green; or
-- You wrote a minimal repro to runs/{{slug}}/QUESTIONS.md and set sync/STATE.md status=blocked.
-
-Post-run:
-- Update sync/STATE.md (Last Run + Focus).
-- Append a timeline line to stories/{{slug}}/STORY.md.
-
-Guardrails:
-- Do not modify *_custom.* or // @custom blocks.
-- Prefer *_gen.* or // @generated blocks.
-- Keep `make ci-check` < 8 minutes.
-- Fail-closed on ambiguity.
+Begin now.

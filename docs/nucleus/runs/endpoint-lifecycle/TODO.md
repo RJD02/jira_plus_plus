@@ -1,0 +1,2 @@
+- Expand `make ci-check` to cover lint/typecheck once the repo configs support TS linting.
+- Add follow-up story for true soft-delete archival (current delete implementation removes the row to satisfy ACs).

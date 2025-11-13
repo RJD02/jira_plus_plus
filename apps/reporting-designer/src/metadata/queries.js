@@ -94,7 +94,6 @@ export const METADATA_OVERVIEW_QUERY = `
     }
   }
 `;
-
 export const REGISTER_METADATA_ENDPOINT_MUTATION = `
   mutation DesignerRegisterMetadataEndpoint($input: EndpointInput!) {
     registerEndpoint(input: $input) {
@@ -102,7 +101,6 @@ export const REGISTER_METADATA_ENDPOINT_MUTATION = `
     }
   }
 `;
-
 export const UPDATE_METADATA_ENDPOINT_MUTATION = `
   mutation DesignerUpdateMetadataEndpoint($id: ID!, $patch: EndpointPatch!) {
     updateEndpoint(id: $id, patch: $patch) {
@@ -116,7 +114,6 @@ export const UPDATE_METADATA_ENDPOINT_MUTATION = `
     }
   }
 `;
-
 export const TRIGGER_METADATA_COLLECTION_MUTATION = `
   mutation DesignerTriggerMetadataCollection($endpointId: ID!, $filters: JSON, $schemaOverride: [String!]) {
     triggerCollection(endpointId: $endpointId, filters: $filters, schemaOverride: $schemaOverride) {
@@ -125,7 +122,6 @@ export const TRIGGER_METADATA_COLLECTION_MUTATION = `
     }
   }
 `;
-
 export const TEST_METADATA_ENDPOINT_MUTATION = `
   mutation DesignerTestMetadataEndpoint($input: TestEndpointInput!) {
     testEndpoint(input: $input) {
@@ -140,13 +136,11 @@ export const TEST_METADATA_ENDPOINT_MUTATION = `
     }
   }
 `;
-
 export const DELETE_METADATA_ENDPOINT_MUTATION = `
   mutation DesignerDeleteMetadataEndpoint($id: ID!) {
     deleteEndpoint(id: $id)
   }
 `;
-
 export const PREVIEW_METADATA_DATASET_MUTATION = `
   mutation DesignerPreviewMetadataDataset($id: ID!, $limit: Int) {
     previewMetadataDataset(id: $id, limit: $limit) {
@@ -155,7 +149,6 @@ export const PREVIEW_METADATA_DATASET_MUTATION = `
     }
   }
 `;
-
 export const ENDPOINT_DATASETS_QUERY = `
   query DesignerEndpointDatasets($endpointId: ID!) {
     endpointDatasets(endpointId: $endpointId) {

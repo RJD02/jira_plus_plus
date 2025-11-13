@@ -337,7 +337,7 @@ type DashboardDefinition = {
 
 const TENANT_HEADER = import.meta.env.VITE_DESIGNER_TENANT_ID ?? "dev";
 const METADATA_MODE = import.meta.env.VITE_METADATA_CLIENT_MODE as MetadataClientMode | undefined;
-const METADATA_ENDPOINT = import.meta.env.VITE_METADATA_GRAPHQL_ENDPOINT;
+const METADATA_ENDPOINT = import.meta.env.VITE_METADATA_GRAPHQL_ENDPOINT ?? "/metadata/graphql";
 
 const BOOTSTRAP_QUERY = `
   query DesignerBootstrap {
@@ -3120,6 +3120,8 @@ const renderManualEditor = () => {
       selectedDatasetIds={selectedDatasetIds}
       toggleDatasetSelection={toggleDatasetSelection}
       authToken={auth.token}
+      projectSlug={auth.user?.projectId ?? null}
+      userRole={auth.user?.role ?? "USER"}
     />
   );
 

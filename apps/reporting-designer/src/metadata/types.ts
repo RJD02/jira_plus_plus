@@ -26,6 +26,16 @@ export type DatasetPreviewResult = {
   sampledAt?: string | null;
 };
 
+export type EndpointDatasetRecord = {
+  id: string;
+  projectId: string;
+  domain: string;
+  labels: string[];
+  payload: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type MetadataCollectionRunSummary = {
   id: string;
   status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED";
@@ -146,9 +156,12 @@ export type MetadataEndpointTemplate = {
 };
 
 export type MetadataEndpointTestResult = {
-  success: boolean;
-  message?: string | null;
-  detectedVersion?: string | null;
-  capabilities?: string[] | null;
-  details?: Record<string, unknown> | null;
+  ok: boolean;
+  diagnostics: Array<{
+    level: string;
+    code: string;
+    message: string;
+    hint?: string | null;
+    field?: string | null;
+  }>;
 };

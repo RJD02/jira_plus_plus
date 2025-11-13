@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { GraphQLScalarType } from "graphql";
+import { GraphQLScalarType, GraphQLError } from "graphql";
 import { DateTimeResolver, JSONResolver } from "graphql-scalars";
 import type {
   MetadataStore,
@@ -19,6 +19,8 @@ import sampleMetadata from "./fixtures/sample-metadata.json" assert { type: "jso
 const CATALOG_DATASET_DOMAIN = process.env.METADATA_CATALOG_DOMAIN ?? "catalog.dataset";
 const DEFAULT_PROJECT_ID = process.env.METADATA_DEFAULT_PROJECT ?? "global";
 const ENABLE_SAMPLE_FALLBACK = process.env.METADATA_SAMPLE_FALLBACK !== "0";
+const TEMPLATE_REFRESH_TIMEOUT_MS = Number(process.env.METADATA_TEMPLATE_REFRESH_TIMEOUT_MS ?? "5000");
+const TEMPLATE_REFRESH_BACKOFF_MS = Number(process.env.METADATA_TEMPLATE_REFRESH_BACKOFF_MS ?? "30000");
 
 export const typeDefs = `#graphql
   scalar DateTime
@@ -91,6 +93,39 @@ export const typeDefs = `#graphql
     config: JSON
   }
 
+  input EndpointInput {
+    projectSlug: String
+    sourceId: String
+    name: String!
+    description: String
+    verb: String!
+    url: String
+    authPolicy: String
+    domain: String
+    labels: [String!]
+    config: JSON
+    capabilities: [String!]
+  }
+
+  input EndpointPatch {
+    name: String
+    description: String
+    verb: String
+    url: String
+    authPolicy: String
+    domain: String
+    labels: [String!]
+    config: JSON
+    capabilities: [String!]
+  }
+
+  input TestEndpointInput {
+    templateId: String!
+    type: String!
+    connection: JSON!
+    capabilities: [String!]
+  }
+
   type CatalogDatasetField {
     name: String!
     type: String!
@@ -125,6 +160,19 @@ export const typeDefs = `#graphql
     sampleRows: [JSON!]
     statistics: JSON
     fields: [CatalogDatasetField!]!
+  }
+
+  type Diagnostic {
+    level: String!
+    code: String!
+    message: String!
+    hint: String
+    field: String
+  }
+
+  type TestResult {
+    ok: Boolean!
+    diagnostics: [Diagnostic!]!
   }
 
   enum MetadataCollectionStatus {
@@ -301,6 +349,11 @@ export const typeDefs = `#graphql
     metadataDataset(id: ID!): CatalogDataset
     metadataCollectionRuns(filter: MetadataCollectionRunFilter, limit: Int): [MetadataCollectionRun!]!
     metadataEndpointTemplates(family: MetadataEndpointFamily): [MetadataEndpointTemplate!]!
+    endpoints(projectSlug: String, capability: String, search: String, first: Int = 50, after: ID): [MetadataEndpoint!]!
+    endpoint(id: ID!): MetadataEndpoint
+    endpointBySourceId(sourceId: String!): MetadataEndpoint
+    endpointDatasets(endpointId: ID!, domain: String, projectSlug: String, first: Int = 100, after: ID): [MetadataRecord!]!
+    endpointTemplates(family: MetadataEndpointFamily): [MetadataEndpointTemplate!]!
   }
 
   type Mutation {
@@ -310,10 +363,138 @@ export const typeDefs = `#graphql
     triggerMetadataCollection(input: MetadataCollectionRequestInput!): MetadataCollectionRun!
     testMetadataEndpoint(input: MetadataEndpointInput!): MetadataEndpointTestResult!
     previewMetadataDataset(id: ID!, limit: Int): CatalogDatasetPreview!
+    testEndpoint(input: TestEndpointInput!): TestResult!
+    registerEndpoint(input: EndpointInput!): MetadataEndpoint!
+    updateEndpoint(id: ID!, patch: EndpointPatch!): MetadataEndpoint!
+    deleteEndpoint(id: ID!): Boolean!
+    triggerCollection(endpointId: ID!, filters: JSON, schemaOverride: [String!]): MetadataCollectionRun!
   }
 `;
 
 export function createResolvers(store: MetadataStore) {
+  const registerEndpointWithInput = async (input: GraphQLMetadataEndpointInput, ctx: ResolverContext) => {
+    let templateId: string | null = null;
+    try {
+      templateId = parseTemplateId(input.config);
+      let built: EndpointBuildResult | undefined;
+      let testResult: EndpointTestResult | null = null;
+      let templateParameters: Record<string, string> = {};
+      if (templateId) {
+        templateParameters = parseTemplateParameters(input.config);
+        const { client, taskQueue } = await getTemporalClient();
+        built = await client.workflow.execute(WORKFLOW_NAMES.buildEndpointConfig, {
+          taskQueue,
+          workflowId: `metadata-endpoint-build-${randomUUID()}`,
+          args: [{ templateId, parameters: templateParameters, extras: { labels: input.labels ?? undefined } }],
+        });
+        testResult = await tryTestEndpointTemplate(client, taskQueue, templateId, templateParameters);
+        if (!testResult || !testResult.success) {
+          throw new GraphQLError("Connection test failed. Re-run test before saving.", {
+            extensions: { code: "E_CONN_TEST_FAILED" },
+          });
+        }
+      }
+
+      const url = built?.url ?? input.url;
+      if (!url) {
+        throw new Error("Endpoint URL is required.");
+      }
+      const versionHint = extractVersionHint(templateParameters) ?? extractVersionHintFromConfig(input.config) ?? undefined;
+      const detectedVersion = testResult?.detectedVersion ?? undefined;
+      const requestedCapabilities = Array.isArray(input.capabilities)
+        ? input.capabilities.filter((capability) => typeof capability === "string")
+        : [];
+      const resolvedCapabilities =
+        requestedCapabilities.length > 0
+          ? requestedCapabilities
+          : testResult?.capabilities && testResult.capabilities.length > 0
+            ? testResult.capabilities
+            : ["metadata"];
+
+      const descriptor: MetadataEndpointDescriptor = {
+        id: input.id ?? undefined,
+        sourceId: input.sourceId ?? undefined,
+        name: input.name,
+        description: input.description ?? undefined,
+        verb: ((input.verb as HttpVerb | undefined) ?? built?.verb ?? "POST") as HttpVerb,
+        url,
+        authPolicy: input.authPolicy ?? undefined,
+        projectId: input.projectId ?? ctx.auth.projectId ?? undefined,
+        domain: input.domain ?? built?.domain ?? undefined,
+        labels: built?.labels ?? input.labels ?? undefined,
+        config: built?.config ?? input.config ?? undefined,
+        detectedVersion,
+        versionHint,
+        capabilities: resolvedCapabilities,
+        deletedAt: null,
+        deletionReason: undefined,
+      };
+      if (descriptor.sourceId) {
+        const existing = await store.listEndpoints(descriptor.projectId ?? ctx.auth.projectId ?? undefined);
+        const duplicate = existing.find(
+          (endpoint) => endpoint.sourceId === descriptor.sourceId && endpoint.id !== descriptor.id,
+        );
+        if (duplicate) {
+          throw new GraphQLError("Duplicate sourceId detected for this project.", {
+            extensions: { code: "E_DUPLICATE_SOURCE_ID", sourceId: descriptor.sourceId },
+          });
+        }
+      }
+
+      const saved = await store.registerEndpoint(descriptor);
+      emitMetadataMetric("metadata.endpoint.register.success", {
+        endpointId: saved.id,
+        templateId,
+        detectedVersion: saved.detectedVersion ?? null,
+        capabilities: saved.capabilities ?? [],
+      });
+      return saved;
+    } catch (error) {
+      emitMetadataMetric(
+        "metadata.endpoint.register.failures",
+        {
+          templateId,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        "error",
+      );
+      throw error;
+    }
+  };
+  let lastTemplateRefreshFailureAt = 0;
+  const fetchEndpointTemplates = async (family?: "JDBC" | "HTTP" | "STREAM") => {
+    const cached = (await store.listEndpointTemplates(family)) as unknown as EndpointTemplate[];
+    const now = Date.now();
+    if (cached.length > 0 && now - lastTemplateRefreshFailureAt < TEMPLATE_REFRESH_BACKOFF_MS) {
+      return filterTemplatesByFamily(cached, family);
+    }
+    try {
+      const { client, taskQueue } = await getTemporalClient();
+      const templates = await withTimeout(
+        client.workflow.execute(WORKFLOW_NAMES.listEndpointTemplates, {
+          taskQueue,
+          workflowId: `metadata-endpoint-templates-${randomUUID()}`,
+          args: [{ family }],
+        }),
+        TEMPLATE_REFRESH_TIMEOUT_MS,
+        "metadata.endpointTemplates.refresh",
+      );
+      if (Array.isArray(templates) && templates.length > 0) {
+        await store.saveEndpointTemplates(
+          templates.map((template) => template as unknown as MetadataEndpointTemplateDescriptor),
+        );
+        return filterTemplatesByFamily(templates as EndpointTemplate[], family);
+      }
+      return filterTemplatesByFamily(cached, family);
+    } catch (error) {
+      lastTemplateRefreshFailureAt = Date.now();
+      console.warn("[metadata.endpointTemplates] refresh failed; using cached descriptors if available", error);
+      if (cached.length > 0) {
+        return filterTemplatesByFamily(cached, family);
+      }
+      throw error;
+    }
+  };
   return {
     DateTime: DateTimeResolver,
     JSON: JSONResolver as GraphQLScalarType,
@@ -405,38 +586,81 @@ export function createResolvers(store: MetadataStore) {
         });
       },
       metadataEndpointTemplates: async (_parent: unknown, args: { family?: "JDBC" | "HTTP" | "STREAM" }) => {
-        const cached = (await store.listEndpointTemplates(args.family)) as unknown as EndpointTemplate[];
-        try {
-          const { client, taskQueue } = await getTemporalClient();
-          const templates = await client.workflow.execute(WORKFLOW_NAMES.listEndpointTemplates, {
-            taskQueue,
-            workflowId: `metadata-endpoint-templates-${randomUUID()}`,
-            args: [{ family: args.family }],
-          });
-          if (Array.isArray(templates) && templates.length > 0) {
-            await store.saveEndpointTemplates(
-              templates.map((template) => template as unknown as MetadataEndpointTemplateDescriptor),
-            );
-            return args.family ? templates.filter((template) => template.family === args.family) : templates;
-          }
-          return cached;
-        } catch (error) {
-          console.warn("[metadata.endpointTemplates] refresh failed; falling back to cached descriptors", error);
-          if (cached.length > 0) {
-            return cached;
-          }
-          throw error;
+        return fetchEndpointTemplates(args.family);
+      },
+      endpoints: async (
+        _parent: unknown,
+        args: {
+          projectSlug?: string | null;
+          capability?: string | null;
+          search?: string | null;
+          first?: number | null;
+          after?: string | null;
+        },
+        ctx: ResolverContext,
+      ) => {
+        enforceReadAccess(ctx);
+        const projectId = args.projectSlug ?? ctx.auth.projectId;
+        const endpoints = await store.listEndpoints(projectId ?? undefined);
+        return paginateEndpoints(endpoints, args.first, args.after, args.capability, args.search);
+      },
+      endpoint: async (_parent: unknown, args: { id: string }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
+        return endpoints.find((endpoint) => endpoint.id === args.id) ?? null;
+      },
+      endpointBySourceId: async (_parent: unknown, args: { sourceId: string }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
+        return endpoints.find((endpoint) => endpoint.sourceId === args.sourceId) ?? null;
+      },
+      endpointDatasets: async (
+        _parent: unknown,
+        args: { endpointId: string; domain?: string | null; projectSlug?: string | null; first?: number | null; after?: string | null },
+        ctx: ResolverContext,
+      ) => {
+        enforceReadAccess(ctx);
+        const label = `endpoint:${args.endpointId}`;
+        const projectId = args.projectSlug ?? ctx.auth.projectId;
+        const records = await store.listRecords(CATALOG_DATASET_DOMAIN, {
+          projectId: projectId ?? undefined,
+          labels: [label],
+          limit: args.first ?? 100,
+        });
+        const filtered = args.domain ? records.filter((record) => record.domain === args.domain) : records;
+        if (!args.after) {
+          return filtered;
         }
+        const index = filtered.findIndex((record) => record.id === args.after);
+        if (index < 0) {
+          return filtered;
+        }
+        return filtered.slice(index + 1);
+      },
+      endpointTemplates: async (_parent: unknown, args: { family?: "JDBC" | "HTTP" | "STREAM" | null }, ctx: ResolverContext) => {
+        enforceReadAccess(ctx);
+        return fetchEndpointTemplates(args.family ?? undefined);
       },
     },
     Mutation: {
       upsertMetadataRecord: async (_parent: unknown, args: { input: GraphQLMetadataRecordInput }, ctx: ResolverContext) => {
         enforceWriteAccess(ctx);
+        const normalizedPayload = normalizePayload(args.input.payload);
+        const sourceEndpointId = normalizedPayload ? extractSourceEndpointId(normalizedPayload) : null;
+        const labelSet = new Set<string>();
+        (args.input.labels ?? []).forEach((label) => {
+          if (typeof label === "string" && label.trim().length > 0) {
+            labelSet.add(label);
+          }
+        });
+        if (sourceEndpointId) {
+          labelSet.add(`endpoint:${sourceEndpointId}`);
+        }
         const payload: MetadataRecordInput<unknown> = {
           id: args.input.id ?? undefined,
           projectId: args.input.projectId ?? ctx.auth.projectId,
           domain: args.input.domain,
-          labels: args.input.labels ?? undefined,
+          labels: labelSet.size > 0 ? Array.from(labelSet) : undefined,
           payload: args.input.payload,
         };
         const record = await store.upsertRecord(payload);
@@ -444,85 +668,30 @@ export function createResolvers(store: MetadataStore) {
       },
       registerMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }, ctx: ResolverContext) => {
         enforceWriteAccess(ctx);
-        let templateId: string | null = null;
-        try {
-          templateId = parseTemplateId(args.input.config);
-          let built: EndpointBuildResult | undefined;
-          let testResult: EndpointTestResult | null = null;
-          let templateParameters: Record<string, string> = {};
-          if (templateId) {
-            templateParameters = parseTemplateParameters(args.input.config);
-            const { client, taskQueue } = await getTemporalClient();
-            built = await client.workflow.execute(WORKFLOW_NAMES.buildEndpointConfig, {
-              taskQueue,
-              workflowId: `metadata-endpoint-build-${randomUUID()}`,
-              args: [{ templateId, parameters: templateParameters, extras: { labels: args.input.labels ?? undefined } }],
-            });
-            testResult = await tryTestEndpointTemplate(client, taskQueue, templateId, templateParameters);
-          }
-
-          const url = built?.url ?? args.input.url;
-          if (!url) {
-            throw new Error("Endpoint URL is required.");
-          }
-          const versionHint =
-            extractVersionHint(templateParameters) ?? extractVersionHintFromConfig(args.input.config) ?? undefined;
-
-          const detectedVersion = testResult?.detectedVersion ?? undefined;
-          const resolvedCapabilities =
-            testResult?.capabilities && testResult.capabilities.length > 0 ? testResult.capabilities : ["metadata"];
-
-          const descriptor: MetadataEndpointDescriptor = {
-            id: args.input.id ?? undefined,
-            sourceId: args.input.sourceId ?? undefined,
-            name: args.input.name,
-            description: args.input.description ?? undefined,
-            verb: ((args.input.verb as HttpVerb | undefined) ?? built?.verb ?? "POST") as HttpVerb,
-            url,
-            authPolicy: args.input.authPolicy ?? undefined,
-            projectId: args.input.projectId ?? ctx.auth.projectId ?? undefined,
-            domain: args.input.domain ?? built?.domain ?? undefined,
-            labels: built?.labels ?? args.input.labels ?? undefined,
-            config: built?.config ?? args.input.config ?? undefined,
-            detectedVersion,
-            versionHint,
-            capabilities: resolvedCapabilities,
-            deletedAt: null,
-            deletionReason: undefined,
-          };
-          const saved = await store.registerEndpoint(descriptor);
-          emitMetadataMetric("metadata.endpoint.register.success", {
-            endpointId: saved.id,
-            templateId,
-            detectedVersion: saved.detectedVersion ?? null,
-            capabilities: saved.capabilities ?? [],
-          });
-          return saved;
-        } catch (error) {
-          emitMetadataMetric(
-            "metadata.endpoint.register.failures",
-            {
-              templateId,
-              message: error instanceof Error ? error.message : String(error),
-            },
-            "error",
-          );
-          throw error;
-        }
+        return registerEndpointWithInput(args.input, ctx);
       },
       deleteMetadataEndpoint: async (_parent: unknown, args: { id: string; reason?: string | null }, ctx: ResolverContext) => {
-        enforceWriteAccess(ctx);
+        enforceWriteAccess(ctx, "admin");
         const endpoints = await store.listEndpoints(ctx.auth.projectId);
         const target = endpoints.find((endpoint) => endpoint.id === args.id || endpoint.sourceId === args.id);
         if (!target) {
-          throw new Error("Endpoint not found");
+          throw new GraphQLError("Endpoint not found", { extensions: { code: "E_NOT_FOUND" } });
         }
-        const deleted = await store.registerEndpoint({
+        await ensureNoActiveRuns(target.id ?? args.id);
+        const deletionTimestamp = new Date().toISOString();
+        let descriptor: MetadataEndpointDescriptor = {
           ...target,
-          deletedAt: new Date().toISOString(),
+          deletedAt: deletionTimestamp,
           deletionReason: args.reason ?? target.deletionReason ?? null,
-        });
-        return deleted;
+        };
+        try {
+          const prisma = await getPrismaClient();
+          await prisma.metadataEndpoint.delete({ where: { id: target.id } });
+        } catch {
+          const fallback = await store.registerEndpoint(descriptor);
+          descriptor = fallback;
+        }
+        return descriptor;
       },
       triggerMetadataCollection: async (
         _parent: unknown,
@@ -533,10 +702,21 @@ export function createResolvers(store: MetadataStore) {
         const prisma = await getPrismaClient();
         const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: args.input.endpointId } });
         if (!endpoint || endpoint.projectId !== ctx.auth.projectId) {
-          throw new Error("Endpoint not found");
+          throw new GraphQLError("Endpoint not found", { extensions: { code: "E_NOT_FOUND" } });
         }
         if (!endpoint.url) {
-          throw new Error("Endpoint is missing a connection URL");
+          throw new GraphQLError("Endpoint is missing a connection URL", {
+            extensions: { code: "E_CONN_TEST_REQUIRED" },
+          });
+        }
+        if (
+          Array.isArray(endpoint.capabilities) &&
+          endpoint.capabilities.length > 0 &&
+          !endpoint.capabilities.includes("metadata")
+        ) {
+          throw new GraphQLError("Endpoint is missing the required \"metadata\" capability.", {
+            extensions: { code: "E_CAPABILITY_MISSING" },
+          });
         }
         const filters = buildRunFilters(args.input.schemas);
         const run = await prisma.metadataCollectionRun.create({
@@ -548,6 +728,10 @@ export function createResolvers(store: MetadataStore) {
           },
           include: { endpoint: true },
         });
+
+        if (shouldBypassCollection(ctx)) {
+          return finalizeCollectionRun(prisma, run.id, "SUCCEEDED");
+        }
 
         const { client, taskQueue } = await getTemporalClient();
         const workflowId = `metadata-collection-${run.id}`;
@@ -603,7 +787,9 @@ export function createResolvers(store: MetadataStore) {
           throw new Error("Source endpoint is not registered or missing connection URL");
         }
         if (Array.isArray(endpoint.capabilities) && endpoint.capabilities.length > 0 && !endpoint.capabilities.includes("preview")) {
-          throw new Error("Endpoint does not expose the `preview` capability required for dataset previews.");
+          throw new GraphQLError("Endpoint does not expose the `preview` capability required for dataset previews.", {
+            extensions: { code: "E_CAPABILITY_MISSING" },
+          });
         }
         const { client, taskQueue } = await getTemporalClient();
         return client.workflow.execute(WORKFLOW_NAMES.previewDataset, {
@@ -620,8 +806,165 @@ export function createResolvers(store: MetadataStore) {
           ],
         });
       },
+      testEndpoint: async (_parent: unknown, args: { input: GraphQLTestEndpointInput }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
+        const config = {
+          templateId: args.input.templateId,
+          parameters: normalizeTestConnection(args.input.connection),
+        };
+        const { client, taskQueue } = await getTemporalClient();
+        try {
+          const result = await client.workflow.execute(WORKFLOW_NAMES.testEndpointConnection, {
+            taskQueue,
+            workflowId: `metadata-endpoint-test-${randomUUID()}`,
+            args: [{ templateId: args.input.templateId, parameters: config.parameters }],
+          });
+          return {
+            ok: Boolean(result?.success),
+            diagnostics: buildDiagnosticsFromTestResult(result),
+          };
+        } catch (error) {
+          return {
+            ok: false,
+            diagnostics: [
+              {
+                level: "ERROR",
+                code: "E_CONN_TEST_FAILED",
+                message: error instanceof Error ? error.message : "Connection test failed.",
+              },
+            ],
+          };
+        }
+      },
+      registerEndpoint: async (_parent: unknown, args: { input: GraphQLEndpointInput }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
+        const payload: GraphQLMetadataEndpointInput = {
+          projectId: args.input.projectSlug ?? ctx.auth.projectId ?? undefined,
+          sourceId: args.input.sourceId ?? undefined,
+          name: args.input.name,
+          description: args.input.description ?? undefined,
+          verb: args.input.verb,
+          url: args.input.url ?? undefined,
+          authPolicy: args.input.authPolicy ?? undefined,
+          domain: args.input.domain ?? undefined,
+          labels: args.input.labels ?? undefined,
+          config: args.input.config ?? undefined,
+          capabilities: args.input.capabilities ?? undefined,
+        };
+        return registerEndpointWithInput(payload, ctx);
+      },
+      updateEndpoint: async (_parent: unknown, args: { id: string; patch: GraphQLEndpointPatch }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx);
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
+        const target = endpoints.find((endpoint) => endpoint.id === args.id);
+        if (!target) {
+          throw new Error("Endpoint not found");
+        }
+        const connectionChanged =
+          (args.patch.verb !== undefined && args.patch.verb !== target.verb) ||
+          (args.patch.url !== undefined && args.patch.url !== target.url) ||
+          (args.patch.authPolicy !== undefined && args.patch.authPolicy !== target.authPolicy) ||
+          args.patch.config !== undefined;
+        if (connectionChanged && !args.patch.config) {
+          throw new GraphQLError("Re-test connection before updating connection details.", {
+            extensions: { code: "E_CONN_TEST_REQUIRED" },
+          });
+        }
+        const payload: GraphQLMetadataEndpointInput = {
+          id: target.id,
+          sourceId: target.sourceId ?? undefined,
+          projectId: target.projectId ?? ctx.auth.projectId ?? undefined,
+          name: args.patch.name ?? target.name,
+          description: args.patch.description ?? target.description ?? undefined,
+          verb: args.patch.verb ?? target.verb,
+          url: args.patch.url ?? target.url,
+          authPolicy: args.patch.authPolicy ?? target.authPolicy ?? undefined,
+          domain: args.patch.domain ?? target.domain ?? undefined,
+          labels: args.patch.labels ?? target.labels ?? undefined,
+          config: args.patch.config ?? target.config ?? undefined,
+          capabilities: args.patch.capabilities ?? target.capabilities ?? undefined,
+        };
+        return registerEndpointWithInput(payload, ctx);
+      },
+      deleteEndpoint: async (_parent: unknown, args: { id: string }, ctx: ResolverContext) => {
+        enforceWriteAccess(ctx, "admin");
+        const endpoints = await store.listEndpoints(ctx.auth.projectId);
+        const target = endpoints.find((endpoint) => endpoint.id === args.id || endpoint.sourceId === args.id);
+        if (!target) {
+          throw new GraphQLError("Endpoint not found", { extensions: { code: "E_NOT_FOUND" } });
+        }
+        await ensureNoActiveRuns(target.id ?? args.id);
+        const deletionTimestamp = new Date().toISOString();
+        try {
+          const prisma = await getPrismaClient();
+          await prisma.metadataEndpoint.delete({ where: { id: target.id } });
+        } catch {
+          await store.registerEndpoint({
+            ...target,
+            deletedAt: deletionTimestamp,
+            deletionReason: target.deletionReason ?? null,
+          });
+        }
+        return true;
+      },
+      triggerCollection: async (
+        _parent: unknown,
+        args: { endpointId: string; filters?: Record<string, unknown> | null; schemaOverride?: string[] | null },
+        ctx: ResolverContext,
+      ) => {
+        enforceWriteAccess(ctx);
+        const prisma = await getPrismaClient();
+        const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: args.endpointId } });
+        if (!endpoint || endpoint.projectId !== ctx.auth.projectId) {
+          throw new GraphQLError("Endpoint not found", { extensions: { code: "E_NOT_FOUND" } });
+        }
+        if (!endpoint.url) {
+          throw new GraphQLError("Endpoint is missing a connection URL", {
+            extensions: { code: "E_CONN_TEST_REQUIRED" },
+          });
+        }
+        if (
+          Array.isArray(endpoint.capabilities) &&
+          endpoint.capabilities.length > 0 &&
+          !endpoint.capabilities.includes("metadata")
+        ) {
+          throw new GraphQLError("Endpoint is missing the required \"metadata\" capability.", {
+            extensions: { code: "E_CAPABILITY_MISSING" },
+          });
+        }
+        const filters =
+          args.filters ?? (args.schemaOverride && args.schemaOverride.length ? buildRunFilters(args.schemaOverride) : undefined);
+        const run = await prisma.metadataCollectionRun.create({
+          data: {
+            endpointId: endpoint.id,
+            status: "QUEUED",
+            requestedBy: ctx.userId ?? undefined,
+            filters,
+          },
+          include: { endpoint: true },
+        });
+        if (shouldBypassCollection(ctx)) {
+          return finalizeCollectionRun(prisma, run.id, "SUCCEEDED");
+        }
+        const { client, taskQueue } = await getTemporalClient();
+        const workflowId = `metadata-collection-${run.id}`;
+        const handle = await client.workflow.start(WORKFLOW_NAMES.metadataCollection, {
+          taskQueue,
+          workflowId,
+          args: [{ runId: run.id }],
+        });
+        await prisma.metadataCollectionRun.update({
+          where: { id: run.id },
+          data: {
+            workflowId: handle.workflowId,
+            temporalRunId: handle.firstExecutionRunId,
+          },
+        });
+        return prisma.metadataCollectionRun.findUnique({ where: { id: run.id }, include: { endpoint: true } });
+      },
     },
     MetadataEndpoint: {
+      url: (parent: { url?: string | null }) => maskEndpointUrl(parent.url),
       runs: async (parent: { id: string; projectId?: string | null }, args: { limit?: number | null }, ctx: ResolverContext) => {
         enforceReadAccess(ctx);
         if (parent.projectId && parent.projectId !== ctx.auth.projectId) {
@@ -694,49 +1037,188 @@ export function createResolvers(store: MetadataStore) {
   };
 }
 
+function normalizeTestConnection(connection: Record<string, unknown> | null | undefined): Record<string, string> {
+  if (!connection || typeof connection !== "object") {
+    return {};
+  }
+  return Object.fromEntries(
+    Object.entries(connection).map(([key, value]) => [key, value === undefined || value === null ? "" : String(value)]),
+  );
+}
+
+function buildDiagnosticsFromTestResult(result: EndpointTestResult | null): Array<{
+  level: string;
+  code: string;
+  message: string;
+  hint?: string | null;
+  field?: string | null;
+}> {
+  if (!result) {
+    return [
+      {
+        level: "ERROR",
+        code: "E_CONN_TEST_FAILED",
+        message: "Connection test did not run.",
+      },
+    ];
+  }
+  if (result.success) {
+    return [
+      {
+        level: "INFO",
+        code: "CONNECTION_OK",
+        message: result.message ?? "Connection parameters validated.",
+      },
+    ];
+  }
+  return [
+    {
+      level: "ERROR",
+      code: "E_CONN_TEST_FAILED",
+      message: result.message ?? "Connection test failed.",
+      hint: typeof result.details === "object" ? JSON.stringify(result.details) : undefined,
+    },
+  ];
+}
+
+function paginateEndpoints(
+  endpoints: MetadataEndpointDescriptor[],
+  first?: number | null,
+  after?: string | null,
+  capability?: string | null,
+  search?: string | null,
+): MetadataEndpointDescriptor[] {
+  let filtered = [...endpoints];
+  if (capability) {
+    filtered = filtered.filter((endpoint) => (endpoint.capabilities ?? []).includes(capability));
+  }
+  if (search && search.trim().length > 0) {
+    const query = search.trim().toLowerCase();
+    filtered = filtered.filter((endpoint) => {
+      const haystack = [endpoint.name, endpoint.description, endpoint.domain, endpoint.url]
+        .filter(Boolean)
+        .join(" ")
+        .toLowerCase();
+      return haystack.includes(query);
+    });
+  }
+  if (after) {
+    const index = filtered.findIndex((endpoint) => endpoint.id === after);
+    if (index >= 0) {
+      filtered = filtered.slice(index + 1);
+    }
+  }
+  const limit = Math.min(Math.max(first ?? 50, 1), 100);
+  return filtered.slice(0, limit);
+}
+
+function maskEndpointUrl(value?: string | null): string | null {
+  if (!value) {
+    return value ?? null;
+  }
+  try {
+    const parsed = new URL(value);
+    if (parsed.username || parsed.password) {
+      if (parsed.username) {
+        parsed.username = "****";
+      }
+      if (parsed.password) {
+        parsed.password = "****";
+      }
+      return parsed.toString();
+    }
+    return value;
+  } catch {
+    return value.replace(/\/\/([^@/]+)@/, "//****:****@");
+  }
+}
+
+function normalizedRoles(context: ResolverContext): string[] {
+  return (context.auth.roles ?? []).map((role) => role.toLowerCase());
+}
+
+function hasRole(context: ResolverContext, tier: RoleTier): boolean {
+  const roles = normalizedRoles(context);
+  if (tier === "viewer") {
+    return roles.some((role) => ["viewer", "reader", "writer", "editor", "admin", "manager", "user"].includes(role));
+  }
+  if (tier === "editor") {
+    return roles.some((role) => ["editor", "writer", "admin"].includes(role));
+  }
+  return roles.includes("admin");
+}
+
+function requireRole(context: ResolverContext, tier: RoleTier): void {
+  if (!hasRole(context, tier)) {
+    throw new GraphQLError("Role does not permit this operation.", {
+      extensions: { code: "E_ROLE_FORBIDDEN", required: tier },
+    });
+  }
+}
+
+async function ensureNoActiveRuns(endpointId: string): Promise<void> {
+  const prisma = await getPrismaClient();
+  const activeRun = await prisma.metadataCollectionRun.findFirst({
+    where: { endpointId, status: "RUNNING" },
+  });
+  if (activeRun) {
+    throw new GraphQLError("Endpoint has an active collection run.", {
+      extensions: { code: "E_ENDPOINT_IN_USE", runId: activeRun.id },
+    });
+  }
+}
+
 function buildSampleEndpoints(projectId?: string): MetadataEndpointDescriptor[] {
   const targetProject = projectId ?? (sampleMetadata.projectId as string | undefined) ?? DEFAULT_PROJECT_ID;
   const now = new Date().toISOString();
-  return (sampleMetadata.endpoints ?? []).map((endpoint) => ({
-    id: endpoint.id,
-    sourceId: endpoint.sourceId ?? endpoint.id,
-    name: endpoint.name,
-    description: endpoint.description ?? undefined,
-    verb: ((endpoint.verb ?? "POST") as HttpVerb) || "POST",
-    url: endpoint.url,
-    authPolicy: endpoint.authPolicy ?? undefined,
-    projectId: targetProject,
-    domain: endpoint.domain ?? undefined,
-    labels: endpoint.labels ?? undefined,
-    config: endpoint.config ?? undefined,
-    detectedVersion: endpoint.detectedVersion ?? undefined,
-    versionHint: endpoint.versionHint ?? undefined,
-    capabilities: endpoint.capabilities ?? [],
-    createdAt: endpoint.createdAt ?? now,
-    updatedAt: endpoint.updatedAt ?? now,
-    deletedAt: null,
-    deletionReason: null,
-  }));
+  return (sampleMetadata.endpoints ?? []).map((endpoint) => {
+    const typed = endpoint as Partial<MetadataEndpointDescriptor> & { verb?: string };
+    return {
+      id: typed.id ?? endpoint.id,
+      sourceId: typed.sourceId ?? endpoint.id,
+      name: typed.name ?? endpoint.name,
+      description: typed.description ?? endpoint.description ?? undefined,
+      verb: ((typed.verb ?? "POST") as HttpVerb) || "POST",
+      url: typed.url ?? endpoint.url,
+      authPolicy: typed.authPolicy ?? endpoint.authPolicy ?? undefined,
+      projectId: targetProject,
+      domain: typed.domain ?? endpoint.domain ?? undefined,
+      labels: typed.labels ?? endpoint.labels ?? undefined,
+      config: typed.config ?? endpoint.config ?? undefined,
+      detectedVersion: typed.detectedVersion ?? undefined,
+      versionHint: typed.versionHint ?? undefined,
+      capabilities: typed.capabilities ?? [],
+      createdAt: typed.createdAt ?? now,
+      updatedAt: typed.updatedAt ?? now,
+      deletedAt: null,
+      deletionReason: null,
+    };
+  });
 }
 
 function buildSampleCatalogDatasets(projectId?: string): CatalogDataset[] {
   const targetProject = projectId ?? (sampleMetadata.projectId as string | undefined) ?? DEFAULT_PROJECT_ID;
   const now = new Date().toISOString();
   const records: MetadataRecord<unknown>[] = (sampleMetadata.datasets ?? []).map((dataset) => {
-    const basePayload = { ...(dataset.payload as Record<string, unknown>) };
+    const typed = dataset as Partial<MetadataRecord<unknown>> & {
+      payload?: Record<string, unknown>;
+      labels?: string[];
+      sourceEndpointId?: string;
+    };
+    const basePayload = { ...(typed.payload as Record<string, unknown>), ...(dataset.payload as Record<string, unknown>) };
     const metadataBlock = (basePayload["_metadata"] as Record<string, unknown> | undefined) ?? {};
     const endpointId =
-      dataset.sourceEndpointId ?? (sampleMetadata.endpoints?.[0]?.id as string | undefined) ?? "seed-endpoint";
+      typed.sourceEndpointId ?? dataset.sourceEndpointId ?? (sampleMetadata.endpoints?.[0]?.id as string | undefined) ?? "seed-endpoint";
     basePayload["metadata_endpoint_id"] = basePayload["metadata_endpoint_id"] ?? endpointId;
     metadataBlock["source_endpoint_id"] = metadataBlock["source_endpoint_id"] ?? endpointId;
     metadataBlock["source_id"] = metadataBlock["source_id"] ?? endpointId;
     metadataBlock["collected_at"] = metadataBlock["collected_at"] ?? now;
     basePayload["_metadata"] = metadataBlock;
     return {
-      id: dataset.id,
-      projectId: dataset.projectId ?? targetProject,
+      id: typed.id ?? dataset.id,
+      projectId: typed.projectId ?? targetProject,
       domain: CATALOG_DATASET_DOMAIN,
-      labels: dataset.labels ?? [],
+      labels: typed.labels ?? dataset.labels ?? [],
       payload: basePayload,
       createdAt: now,
       updatedAt: now,
@@ -864,20 +1346,21 @@ type ResolverContext = {
   bypassWrites?: boolean;
 };
 
+type RoleTier = "viewer" | "editor" | "admin";
+
 function enforceReadAccess(context: ResolverContext) {
   if (!context.auth.tenantId || !context.auth.projectId) {
-    throw new Error("Missing tenant/project context");
+    throw new GraphQLError("Missing tenant or project context.", { extensions: { code: "E_ROLE_FORBIDDEN" } });
   }
+  requireRole(context, "viewer");
 }
 
-function enforceWriteAccess(context: ResolverContext) {
+function enforceWriteAccess(context: ResolverContext, minimumRole: RoleTier = "editor") {
   enforceReadAccess(context);
   if (context.bypassWrites) {
     return;
   }
-  if (!context.auth.roles.includes("writer") && !context.auth.roles.includes("admin")) {
-    throw new Error("Write access denied");
-  }
+  requireRole(context, minimumRole);
 }
 
 type GraphQLMetadataEndpointInput = {
@@ -892,6 +1375,40 @@ type GraphQLMetadataEndpointInput = {
   domain?: string | null;
   labels?: string[] | null;
   config?: Record<string, unknown> | null;
+  capabilities?: string[] | null;
+};
+
+type GraphQLEndpointInput = {
+  projectSlug?: string | null;
+  sourceId?: string | null;
+  name: string;
+  description?: string | null;
+  verb: string;
+  url?: string | null;
+  authPolicy?: string | null;
+  domain?: string | null;
+  labels?: string[] | null;
+  config?: Record<string, unknown> | null;
+  capabilities?: string[] | null;
+};
+
+type GraphQLEndpointPatch = {
+  name?: string | null;
+  description?: string | null;
+  verb?: string | null;
+  url?: string | null;
+  authPolicy?: string | null;
+  domain?: string | null;
+  labels?: string[] | null;
+  config?: Record<string, unknown> | null;
+  capabilities?: string[] | null;
+};
+
+type GraphQLTestEndpointInput = {
+  templateId: string;
+  type: string;
+  connection: Record<string, unknown>;
+  capabilities?: string[] | null;
 };
 
 type MetadataCollectionRequestInput = {
@@ -957,6 +1474,54 @@ function mapCatalogRecordToDataset(record: MetadataRecord<unknown>): CatalogData
     statistics: statistics ?? null,
     fields: extractDatasetFields(payload),
   };
+}
+
+function filterTemplatesByFamily(templates: EndpointTemplate[], family?: "JDBC" | "HTTP" | "STREAM" | null) {
+  if (!family) {
+    return templates;
+  }
+  return templates.filter((template) => template.family === family);
+}
+
+function shouldBypassCollection(context: ResolverContext): boolean {
+  return Boolean(context.bypassWrites || process.env.METADATA_FAKE_COLLECTIONS === "1");
+}
+
+async function finalizeCollectionRun(
+  prisma: Awaited<ReturnType<typeof getPrismaClient>>,
+  runId: string,
+  status: MetadataCollectionStatus,
+  error?: string | null,
+) {
+  return prisma.metadataCollectionRun.update({
+    where: { id: runId },
+    data: {
+      status,
+      error: error ?? null,
+      completedAt: new Date(),
+    },
+    include: { endpoint: true },
+  });
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  if (!timeoutMs || timeoutMs <= 0) {
+    return promise;
+  }
+  return new Promise<T>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+    promise
+      .then((value) => {
+        clearTimeout(timeout);
+        resolve(value);
+      })
+      .catch((error) => {
+        clearTimeout(timeout);
+        reject(error);
+      });
+  });
 }
 
 function normalizePayload(value: unknown): Record<string, any> | null {

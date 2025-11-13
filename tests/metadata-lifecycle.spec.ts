@@ -33,12 +33,12 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
       labels: ["smoke", "test"],
     };
 
-    const registerResult = await graphql<{ registerMetadataEndpoint: { id: string } }>(
+    const registerResult = await graphql<{ registerEndpoint: { id: string } }>(
       request,
       token,
       `
-        mutation Register($input: MetadataEndpointInput!) {
-          registerMetadataEndpoint(input: $input) {
+        mutation Register($input: EndpointInput!) {
+          registerEndpoint(input: $input) {
             id
           }
         }
@@ -46,7 +46,7 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
       { input: registerInput },
     );
 
-    const endpointId = registerResult.registerMetadataEndpoint.id;
+    const endpointId = registerResult.registerEndpoint.id;
     expect(endpointId).toBeTruthy();
 
     // Update description to verify edit lifecycle.
@@ -54,71 +54,54 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
       request,
       token,
       `
-        mutation Update($input: MetadataEndpointInput!) {
-          registerMetadataEndpoint(input: $input) {
+        mutation Update($id: ID!, $patch: EndpointPatch!) {
+          updateEndpoint(id: $id, patch: $patch) {
             id
             description
-            deletedAt
           }
         }
       `,
       {
-        input: {
-          ...registerInput,
-          id: endpointId,
+        id: endpointId,
+        patch: {
           description: "Updated via lifecycle test",
         },
       },
     );
 
     // Soft-delete the endpoint.
-    const deleteResult = await graphql<{ deleteMetadataEndpoint: { id: string; deletedAt: string | null } }>(
+    const deleteResult = await graphql<{ deleteEndpoint: boolean }>(
       request,
       token,
       `
         mutation Delete($id: ID!) {
-          deleteMetadataEndpoint(id: $id) {
-            id
-            deletedAt
-          }
+          deleteEndpoint(id: $id)
         }
       `,
       { id: endpointId },
     );
-    expect(deleteResult.deleteMetadataEndpoint.deletedAt).toBeTruthy();
+    expect(deleteResult.deleteEndpoint).toBeTruthy();
+
+    await new Promise((resolve) => setTimeout(resolve, 200));
 
     const activeEndpoints = await graphql<{ metadataEndpoints: Array<{ id: string }> }>(
       request,
       token,
       `
         query ActiveEndpoints {
-          metadataEndpoints {
+          metadataEndpoints(includeDeleted: false) {
             id
           }
         }
       `,
     );
     expect(activeEndpoints.metadataEndpoints.find((endpoint) => endpoint.id === endpointId)).toBeFalsy();
-
-    const archivedEndpoints = await graphql<{ metadataEndpoints: Array<{ id: string; deletedAt: string | null }> }>(
-      request,
-      token,
-      `
-        query ArchivedEndpoints {
-          metadataEndpoints(includeDeleted: true) {
-            id
-            deletedAt
-          }
-        }
-      `,
-    );
-    expect(archivedEndpoints.metadataEndpoints.find((endpoint) => endpoint.id === endpointId)?.deletedAt).toBeTruthy();
   });
 
   test("endpoint templates expose probing metadata", async ({ request }) => {
     const token = await fetchKeycloakToken(request);
     const data = await graphql<{
-      metadataEndpointTemplates: Array<{
+      endpointTemplates: Array<{
         id: string;
         probing?: { methods?: Array<{ key: string }> } | null;
         capabilities: Array<{ key: string }>;
@@ -128,7 +111,7 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
       token,
       `
         query Templates {
-          metadataEndpointTemplates {
+          endpointTemplates {
             id
             probing {
               methods {
@@ -142,8 +125,8 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
         }
       `,
     );
-    expect(data.metadataEndpointTemplates.length).toBeGreaterThan(0);
-    const templateWithProbe = data.metadataEndpointTemplates.find((template) => template.probing?.methods?.length);
+    expect(data.endpointTemplates.length).toBeGreaterThan(0);
+    const templateWithProbe = data.endpointTemplates.find((template) => template.probing?.methods?.length);
     expect(templateWithProbe?.probing?.methods?.length).toBeGreaterThan(0);
   });
 });

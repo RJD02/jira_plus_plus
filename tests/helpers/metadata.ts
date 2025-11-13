@@ -87,28 +87,29 @@ async function seedCatalogDataset(request: APIRequestContext): Promise<void> {
 
 async function registerTestEndpoint(request: APIRequestContext, token: string): Promise<string> {
   const suffix = Date.now().toString(36);
-  const registerResult = await graphql<{ registerMetadataEndpoint: { id: string } }>(
+  const registerResult = await graphql<{ registerEndpoint: { id: string } }>(
     request,
     token,
     `
-      mutation SeedRegisterEndpoint($input: MetadataEndpointInput!) {
-        registerMetadataEndpoint(input: $input) {
+      mutation SeedRegisterEndpoint($input: EndpointInput!) {
+        registerEndpoint(input: $input) {
           id
         }
       }
     `,
     {
       input: {
+        projectSlug: metadataDefaultProject,
         name: `Seed Endpoint ${suffix}`,
         verb: "POST",
         url: `https://metadata-seed-${suffix}.example.com/api`,
         description: "Seeded endpoint for metadata smoke tests",
         labels: ["seed", "smoke"],
-        projectId: metadataDefaultProject,
+        config: null,
       },
     },
   );
-  return registerResult.registerMetadataEndpoint.id;
+  return registerResult.registerEndpoint.id;
 }
 
 async function upsertCatalogRecord(request: APIRequestContext, token: string, endpointId: string): Promise<void> {
@@ -144,7 +145,7 @@ async function upsertCatalogRecord(request: APIRequestContext, token: string, en
           schema: "PUBLIC",
           name: `seed_table_${datasetId}`,
           description: "Synthetic metadata catalog dataset generated for smoke tests.",
-          labels: ["seed", "smoke"],
+          labels: ["seed", "smoke", `endpoint:${endpointId}`],
           metadata_endpoint_id: endpointId,
           _metadata: {
             source_endpoint_id: endpointId,

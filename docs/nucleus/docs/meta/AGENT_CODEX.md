@@ -17,6 +17,8 @@ This contract instructs the Developer Agent (Codex) how to pick work, read specs
 
 ## Loop
 Plan → Implement → Test → Patch → Heartbeat every 10–15m (append to LOG.md: {timestamp, done, next, risks}).
+
+## Guardrails
 - Keep commits small (≤ ~150 LOC), reference acceptance ID.
 - Do not touch *_custom.* files or // @custom blocks; generated regions only.
 - Fast test path: `make ci-check` under 8m; store failing logs under .artifacts/<ts>/
@@ -26,7 +28,37 @@ Plan → Implement → Test → Patch → Heartbeat every 10–15m (append to LO
 - Blocked: write minimal repro in QUESTIONS.md; set STATE status=blocked.
 
 ## Post-Run
-Update sync/STATE.md (Last Run + Focus), append a timeline line in stories/<slug>/STORY.md.
+After each run, update `sync/STATE.md` to reflect the **current snapshot**, not full history:
+
+1. **Focus Feature**
+   - Set to the current slug with its final status for this run:
+     - `in-progress` (if you are intentionally leaving work mid-way),
+     - `success` (all ACCEPTANCE checks green and ci-check passing),
+     - `blocked` (QUESTIONS.md contains a blocking issue).
+
+2. **Last Run**
+   - Overwrite the `Last Run` block with:
+     - `slug`: current slug
+     - `status`: success|in-progress|blocked
+     - `duration`: approximate wall-clock for this run (if known)
+     - `tests`: summary (e.g. `ci-check green`, `e2e skipped`, etc.)
+     - `commits`: short list or count of commits
+     - `decisions`: number of new lines added to DECISIONS.md
+     - `next_step`: a one-line plan for what should happen next (for this slug or overall)
+
+3. **Events (last 24h)**
+   - Append a single summary line for this run with timestamp, e.g.:
+     - `- 2025-11-13T14:05Z run success (workspace-core-bootstrap, ci-check green)`
+     - `- 2025-11-13T16:20Z run blocked (endpoint-lifecycle, UI e2e missing selectors)`
+   - Old events may be trimmed by external governance tooling if needed; AGENT_CODEX does not manage pruning.
+
+4. **Stories**
+   - Append a timeline entry to `stories/<slug>/STORY.md` describing the outcome of this run:
+     - timestamps,
+     - key changes,
+     - acceptance items closed,
+     - any notable decisions.
+
 
 ## Resume
 Read PLAN.md + last 40 lines of LOG.md + open TODO.md; continue next sub-goal.

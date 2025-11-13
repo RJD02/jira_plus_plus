@@ -1,0 +1,33 @@
+corepack pnpm check:metadata-lifecycle
+
+> jira-plus-plus-monorepo@0.1.0 check:metadata-lifecycle /Users/rishikeshkumar/Development/jira_plus_plus
+> PLAYWRIGHT_BROWSERS_PATH=.playwright dotenv -e .env -- npx playwright test tests/metadata-lifecycle.spec.ts --project=chromium
+
+
+Running 3 tests using 1 worker
+
+  ✓  1 [chromium] › tests/metadata-lifecycle.spec.ts:9:7 › Metadata catalog & endpoint lifecycle › catalog datasets are available (seeded) (189ms)
+  ✘  2 [chromium] › tests/metadata-lifecycle.spec.ts:25:7 › Metadata catalog & endpoint lifecycle › register, update, and soft-delete an endpoint (74ms)
+  ✓  3 [chromium] › tests/metadata-lifecycle.spec.ts:118:7 › Metadata catalog & endpoint lifecycle › endpoint templates expose probing metadata (549ms)
+
+
+  1) [chromium] › tests/metadata-lifecycle.spec.ts:25:7 › Metadata catalog & endpoint lifecycle › register, update, and soft-delete an endpoint 
+
+    Error: [2mexpect([22m[31mreceived[39m[2m).[22mtoBeTruthy[2m()[22m
+
+    Received: [31mnull[39m
+
+      86 |       { id: endpointId },
+      87 |     );
+    > 88 |     expect(deleteResult.deleteMetadataEndpoint.deletedAt).toBeTruthy();
+         |                                                           ^
+      89 |
+      90 |     const activeEndpoints = await graphql<{ metadataEndpoints: Array<{ id: string }> }>(
+      91 |       request,
+        at /Users/rishikeshkumar/Development/jira_plus_plus/tests/metadata-lifecycle.spec.ts:88:59
+
+  1 failed
+    [chromium] › tests/metadata-lifecycle.spec.ts:25:7 › Metadata catalog & endpoint lifecycle › register, update, and soft-delete an endpoint 
+  2 passed (2.2s)
+ ELIFECYCLE  Command failed with exit code 1.
+make: *** [smoke] Error 1

@@ -1,0 +1,2 @@
+- 2025-11-12: INTENT.md and SPEC.md are absent; using the `.schema.md` variants in `docs/nucleus/intents/endpoint-lifecycle` as the authoritative spec.
+- 2025-11-12: Map Keycloak realm roles to the spec matrix as reader→viewer, writer→editor, admin→admin until dedicated viewer/editor roles exist.

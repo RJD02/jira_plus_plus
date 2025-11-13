@@ -377,10 +377,14 @@ function deriveRole(parsed: KeycloakTokenParsed): Role {
       }
     });
   }
+  const scope = typeof parsed.scope === "string" ? parsed.scope : null;
+  if (scope && scope.split(" ").map((entry) => entry.trim()).includes("nucleus-context")) {
+    collected.add("writer");
+  }
   if (collected.has("admin")) {
     return "ADMIN";
   }
-  if (collected.has("manager")) {
+  if (collected.has("manager") || collected.has("writer") || collected.has("editor")) {
     return "MANAGER";
   }
   return "USER";

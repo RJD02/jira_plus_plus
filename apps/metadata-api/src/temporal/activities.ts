@@ -116,11 +116,16 @@ export const activities: MetadataActivities = {
       resolvedRecords.map(async (record) => {
         const requestedProjectId = record.projectId || run.endpoint.projectId || DEFAULT_METADATA_PROJECT;
         const projectId = await getOrCreateProjectId(prisma, projectCache, requestedProjectId);
+        const labelSet = new Set(record.labels ?? []);
+        labelSet.add(`endpoint:${run.endpoint.id}`);
+        if (run.endpoint.sourceId) {
+          labelSet.add(`source:${run.endpoint.sourceId}`);
+        }
         const savedRecord = await store.upsertRecord({
           id: record.id ?? `${run.endpoint.id}-${randomUUID()}`,
           projectId,
           domain: record.domain,
-          labels: record.labels ?? [],
+          labels: Array.from(labelSet),
           payload: record.payload,
         });
         await syncRecordToGraph(savedRecord, graphStore, {
