@@ -24,8 +24,9 @@ const REGISTRY_SCRIPT_PATH = path.resolve(
 export type MetadataActivities = {
   markRunStarted(input: { runId: string; workflowId: string; temporalRunId: string }): Promise<void>;
   markRunCompleted(input: { runId: string }): Promise<void>;
+  markRunSkipped(input: { runId: string; reason: string }): Promise<void>;
   markRunFailed(input: { runId: string; error: string }): Promise<void>;
-  prepareCollectionJob(input: { runId: string }): Promise<CollectionJobRequest>;
+  prepareCollectionJob(input: { runId: string }): Promise<CollectionJobPlan>;
   persistCatalogRecords(input: { runId: string; records?: CatalogRecordInput[]; recordsPath?: string | null }): Promise<void>;
   listEndpointTemplates(input: { family?: "JDBC" | "HTTP" | "STREAM" }): Promise<EndpointTemplate[]>;
   buildEndpointConfig(input: {
@@ -48,6 +49,10 @@ export type CollectionJobRequest = {
   projectId?: string | null;
   labels?: string[];
 };
+
+export type CollectionJobPlan =
+  | { kind: "skip"; reason: string; capability?: string }
+  | { kind: "run"; job: CollectionJobRequest };
 
 export type CatalogRecordInput = {
   id?: string;
@@ -137,6 +142,17 @@ export const activities: MetadataActivities = {
       },
     });
   },
+  async markRunSkipped({ runId, reason }: { runId: string; reason: string }) {
+    const prisma = await getPrismaClient();
+    await prisma.metadataCollectionRun.update({
+      where: { id: runId },
+      data: {
+        status: "SKIPPED",
+        completedAt: new Date(),
+        error: reason,
+      },
+    });
+  },
   async markRunFailed({ runId, error }: { runId: string; error: string }) {
     const prisma = await getPrismaClient();
     await prisma.metadataCollectionRun.update({
@@ -162,15 +178,26 @@ export const activities: MetadataActivities = {
     }
 
     const schemas = resolveSchemas(run);
+    const endpointCapabilities: string[] = Array.isArray(run.endpoint.capabilities) ? run.endpoint.capabilities : [];
+    if (endpointCapabilities.length > 0 && !endpointCapabilities.includes("metadata")) {
+      return {
+        kind: "skip",
+        capability: "metadata",
+        reason: `Collection skipped: ${run.endpoint.name} does not expose the "metadata" capability.`,
+      };
+    }
     return {
-      runId: run.id,
-      endpointId: run.endpoint.id,
-      sourceId: run.endpoint.sourceId ?? run.endpoint.id,
-      endpointName: run.endpoint.name,
-      connectionUrl: run.endpoint.url,
-      schemas,
-      projectId: run.endpoint.projectId ?? null,
-      labels: run.endpoint.labels ?? [],
+      kind: "run",
+      job: {
+        runId: run.id,
+        endpointId: run.endpoint.id,
+        sourceId: run.endpoint.sourceId ?? run.endpoint.id,
+        endpointName: run.endpoint.name,
+        connectionUrl: run.endpoint.url,
+        schemas,
+        projectId: run.endpoint.projectId ?? null,
+        labels: run.endpoint.labels ?? [],
+      },
     };
   },
   async listEndpointTemplates({ family }: { family?: "JDBC" | "HTTP" | "STREAM" }) {
@@ -201,14 +228,39 @@ export const activities: MetadataActivities = {
     return payload;
   },
   async testEndpointConnection({ templateId, parameters }: { templateId: string; parameters: Record<string, string> }) {
-    const stdout = await runRegistryCommand([
-      "test",
-      "--template",
-      templateId,
-      "--parameters",
-      JSON.stringify(parameters ?? {}),
-    ]);
-    return JSON.parse(stdout || "{}") as EndpointTestResult;
+    const startedAt = Date.now();
+    emitProbeEvent("endpoint_probe_started", { templateId, parameterKeys: Object.keys(parameters ?? {}) });
+    try {
+      const stdout = await runRegistryCommand([
+        "test",
+        "--template",
+        templateId,
+        "--parameters",
+        JSON.stringify(parameters ?? {}),
+      ]);
+      const result = JSON.parse(stdout || "{}") as EndpointTestResult;
+      const latencyMs = Date.now() - startedAt;
+      emitProbeEvent("endpoint_probe_success", {
+        templateId,
+        detectedVersion: result.detectedVersion ?? null,
+        capabilities: result.capabilities ?? [],
+        latencyMs,
+      });
+      emitProbeEvent("metadata.endpoint.test.latency_ms", { templateId, latencyMs });
+      return result;
+    } catch (error) {
+      const latencyMs = Date.now() - startedAt;
+      emitProbeEvent(
+        "endpoint_probe_failed",
+        {
+          templateId,
+          latencyMs,
+          message: error instanceof Error ? error.message : String(error),
+        },
+        "error",
+      );
+      throw error;
+    }
   },
 };
 
@@ -236,6 +288,15 @@ async function runRegistryCommand(args: string[]) {
     stderr: "inherit",
   });
   return subprocess.stdout.trim();
+}
+
+function emitProbeEvent(event: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
+  const label = `[metadata.endpoint] ${event}`;
+  if (level === "error") {
+    console.error(label, payload);
+  } else {
+    console.info(label, payload);
+  }
 }
 
 async function getOrCreateProjectId(

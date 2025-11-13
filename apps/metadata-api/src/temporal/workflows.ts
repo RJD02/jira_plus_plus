@@ -12,6 +12,7 @@ export const WORKFLOW_NAMES = {
 const {
   markRunStarted,
   markRunCompleted,
+  markRunSkipped,
   markRunFailed,
   prepareCollectionJob,
   persistCatalogRecords,
@@ -56,8 +57,17 @@ export async function metadataCollectionWorkflow(input: { runId: string }) {
   });
 
   try {
-    const job = await prepareCollectionJob({ runId: input.runId });
-    const result = await pythonActivities.collectCatalogSnapshots(job);
+    const plan = await prepareCollectionJob({ runId: input.runId });
+    if (plan.kind === "skip") {
+      log.info("metadata-collection-skip", {
+        runId: input.runId,
+        reason: plan.reason,
+        capability: plan.capability ?? null,
+      });
+      await markRunSkipped({ runId: input.runId, reason: plan.reason });
+      return;
+    }
+    const result = await pythonActivities.collectCatalogSnapshots(plan.job);
     result?.logs?.forEach((entry: Record<string, unknown>) => {
       log.info("metadata-collection-log", entry);
     });

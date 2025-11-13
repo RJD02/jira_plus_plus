@@ -207,7 +207,7 @@ class KafkaStreamEndpoint:
             return EndpointTestResult(False, "CA certificate path is required for SSL-based protocols.")
         if not normalized.get("topics"):
             return EndpointTestResult(False, "At least one topic is required.")
-        return EndpointTestResult(True, "Parameters validated.")
+        return EndpointTestResult(True, "Connection parameters validated.")
 
     @staticmethod
     def _normalize(parameters: Dict[str, Any]) -> Dict[str, str]:

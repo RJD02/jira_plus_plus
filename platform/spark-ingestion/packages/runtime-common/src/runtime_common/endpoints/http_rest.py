@@ -237,7 +237,7 @@ class HttpApiEndpoint:
             return EndpointTestResult(False, "API key header is required when auth type is API key.")
         if auth_type == "BEARER" and not normalized.get("bearer_token"):
             return EndpointTestResult(False, "Bearer token is required when auth type is Bearer.")
-        return EndpointTestResult(True, "Parameters validated.")
+        return EndpointTestResult(True, "Connection parameters validated.")
 
     @staticmethod
     def _normalize(parameters: Dict[str, Any]) -> Dict[str, str]:

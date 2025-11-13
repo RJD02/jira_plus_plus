@@ -81,6 +81,10 @@ const statusStyles: Record<
     badge: "bg-rose-50 text-rose-700 border border-rose-200",
     dot: "bg-rose-500",
   },
+  SKIPPED: {
+    badge: "bg-slate-50 text-slate-700 border border-slate-200",
+    dot: "bg-slate-500",
+  },
 };
 
 export function MetadataWorkspace({
@@ -372,6 +376,13 @@ export function MetadataWorkspace({
         }));
         return;
       }
+      if (!authToken) {
+        setMetadataCatalogPreviewErrors((prev) => ({
+          ...prev,
+          [datasetId]: "Sign in to preview datasets.",
+        }));
+        return;
+      }
       const silent = options?.silent ?? false;
       const limit = options?.limit ?? 20;
       if (!silent) {
@@ -386,7 +397,7 @@ export function MetadataWorkspace({
           PREVIEW_METADATA_DATASET_MUTATION,
           { id: datasetId, limit },
           undefined,
-          { token: authToken ?? undefined },
+          { token: authToken },
         );
         setMetadataCatalogPreviewRows((prev) => ({
           ...prev,
@@ -530,6 +541,16 @@ export function MetadataWorkspace({
         setMetadataMutationError("Configure VITE_METADATA_GRAPHQL_ENDPOINT to trigger collections.");
         return;
       }
+      const targetEndpoint = metadataEndpoints.find((endpoint) => endpoint.id === endpointId);
+      const declaredCapabilities = targetEndpoint?.capabilities ?? [];
+      const supportsMetadataCapability =
+        declaredCapabilities.length === 0 || declaredCapabilities.includes("metadata");
+      if (!supportsMetadataCapability) {
+        setMetadataMutationError(
+          `Cannot trigger collection. ${targetEndpoint?.name ?? "This endpoint"} is missing the "metadata" capability.`,
+        );
+        return;
+      }
       setMetadataMutationError(null);
       try {
         const override = metadataRunOverrides[endpointId];
@@ -556,7 +577,7 @@ export function MetadataWorkspace({
         setMetadataMutationError(error instanceof Error ? error.message : String(error));
       }
     },
-    [authToken, metadataEndpoint, metadataRunOverrides, refreshMetadataWorkspace],
+    [authToken, metadataEndpoint, metadataEndpoints, metadataRunOverrides, refreshMetadataWorkspace],
   );
 
   useEffect(() => {
@@ -629,6 +650,11 @@ export function MetadataWorkspace({
       setMetadataLoading(false);
       return;
     }
+    if (!authToken) {
+      setMetadataLoading(true);
+      setMetadataError(null);
+      return;
+    }
     const controller = new AbortController();
     const loadMetadataOverview = async () => {
       setMetadataLoading(true);
@@ -663,7 +689,7 @@ export function MetadataWorkspace({
   }, [authToken, metadataEndpoint, metadataRefreshToken]);
 
   useEffect(() => {
-    if (!metadataCatalogSelectedDataset) {
+    if (!metadataCatalogSelectedDataset || !authToken) {
       return;
     }
     const datasetId = metadataCatalogSelectedDataset.id;
@@ -676,6 +702,7 @@ export function MetadataWorkspace({
     void handlePreviewMetadataDataset(datasetId, { silent: true });
   }, [
     handlePreviewMetadataDataset,
+    authToken,
     metadataCatalogPreviewRows,
     metadataCatalogSelectedDataset,
     metadataCatalogPreviewingId,
@@ -724,12 +751,23 @@ export function MetadataWorkspace({
     const selectedDatasetEndpoint = metadataCatalogSelectedDataset?.sourceEndpointId
       ? metadataEndpointLookup.get(metadataCatalogSelectedDataset.sourceEndpointId) ?? null
       : null;
+    const endpointPreviewCapabilities = selectedDatasetEndpoint?.capabilities ?? [];
+    const declaresPreviewCapabilities = endpointPreviewCapabilities.length > 0;
+    const endpointSupportsPreview =
+      !declaresPreviewCapabilities || endpointPreviewCapabilities.includes("preview");
+    const previewCapabilityReason =
+      selectedDatasetEndpoint && declaresPreviewCapabilities && !endpointSupportsPreview
+        ? `Dataset previews disabled: ${selectedDatasetEndpoint.name} is missing the "preview" capability.`
+        : null;
     const isPreviewingActive =
       Boolean(metadataCatalogSelectedDataset) && metadataCatalogPreviewingId === metadataCatalogSelectedDataset?.id;
-    const canPreviewDataset = Boolean(metadataCatalogSelectedDataset?.sourceEndpointId && selectedDatasetEndpoint?.url);
-    const previewBlockReason = !canPreviewDataset && metadataCatalogSelectedDataset
-      ? "Link this dataset to a registered endpoint before running previews."
-      : null;
+    const hasLinkedEndpoint = Boolean(metadataCatalogSelectedDataset?.sourceEndpointId && selectedDatasetEndpoint?.url);
+    const previewBlockReason =
+      previewCapabilityReason ??
+      (!hasLinkedEndpoint && metadataCatalogSelectedDataset
+        ? "Link this dataset to a registered endpoint before running previews."
+        : null);
+    const canPreviewDataset = Boolean(metadataCatalogSelectedDataset) && !previewBlockReason;
     const previewRows: Array<Record<string, unknown>> = selectedDatasetPreview?.rows ?? [];
     const previewColumns = previewTableColumns(previewRows);
     return (
@@ -1283,7 +1321,10 @@ export function MetadataWorkspace({
     }
     const style = statusStyles[run.status];
     return (
-      <span className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] ${style.badge}`}>
+      <span
+        className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.3em] ${style.badge}`}
+        title={run.error ?? undefined}
+      >
         <span className={`h-2 w-2 rounded-full ${style.dot}`} />
         {run.status.toLowerCase()}
         {run.completedAt ? <> · {formatRelativeTime(run.completedAt)}</> : null}
@@ -1339,6 +1380,18 @@ export function MetadataWorkspace({
         ) : null}
         {metadataEndpoints.map((endpoint) => {
           const latestRun = metadataLatestRunByEndpoint.get(endpoint.id);
+          const declaredCapabilities = endpoint.capabilities ?? [];
+          const hasDeclaredCapabilities = declaredCapabilities.length > 0;
+          const supportsMetadataCapability =
+            !hasDeclaredCapabilities || declaredCapabilities.includes("metadata");
+          const supportsPreviewCapability =
+            !hasDeclaredCapabilities || declaredCapabilities.includes("preview");
+          const collectionBlockedReason = hasDeclaredCapabilities && !supportsMetadataCapability
+            ? "Metadata collections disabled: this endpoint is missing the \"metadata\" capability."
+            : null;
+          const previewBlockedReason = hasDeclaredCapabilities && !supportsPreviewCapability
+            ? "Dataset previews disabled: this endpoint is missing the \"preview\" capability."
+            : null;
           return (
             <article
               key={endpoint.id}
@@ -1364,6 +1417,11 @@ export function MetadataWorkspace({
                   Details
                 </button>
               </div>
+              {latestRun?.status === "SKIPPED" ? (
+                <p className="mt-2 text-xs text-amber-600 dark:text-amber-300" data-testid="metadata-endpoint-skip">
+                  {latestRun.error ?? "Collection skipped due to missing capability."}
+                </p>
+              ) : null}
               <p className="mt-3 break-all text-xs font-mono text-slate-500 dark:text-slate-400">{endpoint.url}</p>
               {endpoint.domain ? (
                 <p className="mt-1 text-xs text-slate-500 dark:text-slate-400">Domain · {endpoint.domain}</p>
@@ -1386,6 +1444,16 @@ export function MetadataWorkspace({
                   ))}
                 </div>
               ) : null}
+              {collectionBlockedReason ? (
+                <div className="mt-3 rounded-2xl border border-amber-200 bg-amber-50 px-4 py-3 text-xs text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/10 dark:text-amber-100">
+                  {collectionBlockedReason}
+                </div>
+              ) : null}
+              {previewBlockedReason ? (
+                <div className="mt-2 rounded-2xl border border-sky-200 bg-sky-50 px-4 py-3 text-xs text-sky-700 dark:border-sky-500/40 dark:bg-sky-500/10 dark:text-sky-100">
+                  {previewBlockedReason}
+                </div>
+              ) : null}
               <div className="mt-4 space-y-2 rounded-2xl border border-slate-200 bg-slate-50 px-4 py-3 text-xs text-slate-600 dark:border-slate-700 dark:bg-slate-900/40 dark:text-slate-300">
                 <label className="text-[10px] font-semibold uppercase tracking-[0.35em] text-slate-500">Schema override</label>
                 <input
@@ -1402,7 +1470,13 @@ export function MetadataWorkspace({
                 <button
                   type="button"
                   onClick={() => handleTriggerMetadataRun(endpoint.id)}
-                  className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-200"
+                  className={`inline-flex items-center gap-2 rounded-full border px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.3em] transition ${
+                    supportsMetadataCapability
+                      ? "border-slate-300 text-slate-600 hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-200"
+                      : "border-slate-200 text-slate-400 dark:border-slate-700 dark:text-slate-600"
+                  }`}
+                  disabled={!supportsMetadataCapability}
+                  title={collectionBlockedReason ?? undefined}
                 >
                   <LuSquarePlus className="h-4 w-4" />
                   Trigger collection

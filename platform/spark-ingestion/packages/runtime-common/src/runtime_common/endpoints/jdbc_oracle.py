@@ -243,7 +243,7 @@ class OracleEndpoint(JdbcEndpoint):
                 errors.append(f"{field} is required.")
         if errors:
             return EndpointTestResult(False, "; ".join(errors))
-        return EndpointTestResult(True, "Parameters validated.")
+        return EndpointTestResult(True, "Connection parameters validated.")
 
     @classmethod
     def build_connection(cls, parameters: Dict[str, Any]) -> EndpointConnectionResult:

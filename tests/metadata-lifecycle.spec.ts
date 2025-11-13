@@ -114,4 +114,36 @@ test.describe("Metadata catalog & endpoint lifecycle", () => {
     );
     expect(archivedEndpoints.metadataEndpoints.find((endpoint) => endpoint.id === endpointId)?.deletedAt).toBeTruthy();
   });
+
+  test("endpoint templates expose probing metadata", async ({ request }) => {
+    const token = await fetchKeycloakToken(request);
+    const data = await graphql<{
+      metadataEndpointTemplates: Array<{
+        id: string;
+        probing?: { methods?: Array<{ key: string }> } | null;
+        capabilities: Array<{ key: string }>;
+      }>;
+    }>(
+      request,
+      token,
+      `
+        query Templates {
+          metadataEndpointTemplates {
+            id
+            probing {
+              methods {
+                key
+              }
+            }
+            capabilities {
+              key
+            }
+          }
+        }
+      `,
+    );
+    expect(data.metadataEndpointTemplates.length).toBeGreaterThan(0);
+    const templateWithProbe = data.metadataEndpointTemplates.find((template) => template.probing?.methods?.length);
+    expect(templateWithProbe?.probing?.methods?.length).toBeGreaterThan(0);
+  });
 });

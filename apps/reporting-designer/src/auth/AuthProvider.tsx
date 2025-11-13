@@ -1,21 +1,22 @@
-import { createContext, useCallback, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
 import type { KeycloakInstance, KeycloakTokenParsed } from "keycloak-js";
 import {
   kc,
   MAX_AUTO_ATTEMPTS,
   captureKeycloakFragmentError,
+  getAutoAttempts,
   getLastAuthError,
-  incrementAutoAttempts,
   initKeycloak,
   maybeAutoLogin,
   resetAutoAttempts,
   setLastAuthError,
-  getAutoAttempts,
+  type StoredAuthError,
 } from "./keycloak";
 
 export type Role = "ADMIN" | "MANAGER" | "USER";
 export type AuthPhase = "boot" | "checking" | "authenticating" | "authenticated" | "anonymous" | "error";
+export type AuthErrorState = StoredAuthError;
 
 export interface AuthUser {
   id: string;
@@ -32,7 +33,7 @@ interface AuthContextValue {
   hasKeycloak: boolean;
   keycloak: KeycloakInstance | null;
   phase: AuthPhase;
-  error: string | null;
+  error: AuthErrorState | null;
   autoAttempts: number;
   maxAutoAttempts: number;
   login: () => void;
@@ -46,12 +47,36 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
   const [phase, setPhase] = useState<AuthPhase>(() => (hasKeycloak ? "boot" : "anonymous"));
-  const [authError, setAuthError] = useState<string | null>(() => (typeof window === "undefined" ? null : getLastAuthError()));
+  const [authError, setAuthError] = useState<AuthErrorState | null>(() => (typeof window === "undefined" ? null : getLastAuthError()));
   const [autoAttempts, setAutoAttempts] = useState<number>(() => (typeof window === "undefined" ? 0 : getAutoAttempts()));
+  const lastLoggedError = useRef<number | null>(null);
+  const autoSuppressedReason = useRef<string | null>(null);
+  const initLogged = useRef(false);
 
   const syncAutoAttempts = useCallback(() => {
     setAutoAttempts(typeof window === "undefined" ? 0 : getAutoAttempts());
   }, []);
+
+  const handleAuthError = useCallback(
+    (details: AuthErrorState, context: string) => {
+      setAuthError(details);
+      setLastAuthError(details);
+      if (lastLoggedError.current !== details.timestamp) {
+        lastLoggedError.current = details.timestamp;
+        logAuthEvent(
+          "auth:error",
+          {
+            message: details.message,
+            code: details.code ?? null,
+            context,
+            timestamp: details.timestamp,
+          },
+          "error",
+        );
+      }
+    },
+    [],
+  );
 
   const syncFromKeycloak = useCallback(
     (instance: KeycloakInstance) => {
@@ -75,6 +100,11 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setLastAuthError(null);
       resetAutoAttempts();
       syncAutoAttempts();
+      logAuthEvent("auth:success", {
+        subject: mapped.id,
+        tenantId: mapped.tenantId ?? null,
+        projectId: mapped.projectId ?? null,
+      });
     },
     [syncAutoAttempts],
   );
@@ -82,12 +112,17 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const fragmentError = captureKeycloakFragmentError();
     if (fragmentError) {
-      setAuthError(fragmentError);
+      handleAuthError(fragmentError, "fragment");
+    }
+    if (!initLogged.current) {
+      initLogged.current = true;
+      logAuthEvent("auth:init", { phase: hasKeycloak ? "checking" : "anonymous", keycloak: hasKeycloak });
     }
     if (!kc || typeof window === "undefined") {
       setPhase("anonymous");
       return;
     }
+    const keycloak = kc as KeycloakInstance;
     let cancelled = false;
     setPhase("checking");
     initKeycloak()
@@ -96,50 +131,65 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           return;
         }
         if (authenticated) {
-          syncFromKeycloak(kc);
-        } else if (getLastAuthError()) {
-          setAuthError(getLastAuthError());
-          setPhase("error");
+          syncFromKeycloak(keycloak);
         } else {
-          setPhase("anonymous");
+          const stored = getLastAuthError();
+          if (stored) {
+            handleAuthError(stored, "stored");
+            setPhase("error");
+          } else {
+            setPhase("anonymous");
+          }
         }
         syncAutoAttempts();
       })
       .catch((error) => {
         if (!cancelled) {
           const message = error instanceof Error ? error.message : "Keycloak initialization failed";
-          setAuthError(message);
-          setLastAuthError(message);
+          handleAuthError(
+            {
+              message,
+              code: "init_failed",
+              timestamp: Date.now(),
+            },
+            "init",
+          );
           setPhase("error");
           syncAutoAttempts();
         }
       });
 
-    kc.onAuthSuccess = () => {
+    keycloak.onAuthSuccess = () => {
       if (!cancelled) {
-        syncFromKeycloak(kc);
+        syncFromKeycloak(keycloak);
       }
     };
-    kc.onAuthRefreshSuccess = () => {
+    keycloak.onAuthRefreshSuccess = () => {
       if (!cancelled) {
-        syncFromKeycloak(kc);
+        syncFromKeycloak(keycloak);
       }
     };
-    kc.onAuthLogout = () => {
+    keycloak.onAuthLogout = () => {
       if (!cancelled) {
         setUser(null);
         setToken(null);
         setPhase("anonymous");
       }
     };
-    kc.onTokenExpired = () => {
-      kc.updateToken(30).catch(() => {
+    keycloak.onTokenExpired = () => {
+      keycloak.updateToken(30).catch(() => {
         if (!cancelled) {
+          const errorDetails: AuthErrorState = {
+            message: "Session expired. Sign in again to continue.",
+            code: "token_refresh_failed",
+            timestamp: Date.now(),
+          };
+          handleAuthError(errorDetails, "refresh");
           resetAutoAttempts();
           syncAutoAttempts();
           setUser(null);
           setToken(null);
-          setPhase("anonymous");
+          setPhase("error");
         }
       });
     };
@@ -147,24 +197,45 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => {
       cancelled = true;
     };
-  }, [syncAutoAttempts, syncFromKeycloak]);
+  }, [handleAuthError, syncAutoAttempts, syncFromKeycloak]);
 
   useEffect(() => {
     if (!kc || typeof window === "undefined") {
       return;
     }
     if (authError) {
+      if (autoSuppressedReason.current !== "error_blocked") {
+        autoSuppressedReason.current = "error_blocked";
+        logAuthEvent("auth:auto_suppressed", {
+          reason: "error_blocked",
+          message: authError.message,
+        });
+      }
       return;
     }
     if (phase !== "anonymous") {
+      autoSuppressedReason.current = null;
       return;
     }
     if (getAutoAttempts() >= MAX_AUTO_ATTEMPTS) {
+      if (autoSuppressedReason.current !== "exceeded_attempts") {
+        autoSuppressedReason.current = "exceeded_attempts";
+        logAuthEvent("auth:auto_suppressed", {
+          reason: "exceeded_attempts",
+          autoAttempts: getAutoAttempts(),
+        });
+      }
       syncAutoAttempts();
       return;
     }
-    const started = maybeAutoLogin();
-    if (started) {
+    autoSuppressedReason.current = null;
+    const attemptNumber = maybeAutoLogin();
+    if (attemptNumber !== null) {
+      logAuthEvent("auth:auto_attempt", {
+        attempt: attemptNumber,
+        route: currentRoute(),
+        mode: "auto",
+      });
       setPhase("authenticating");
       syncAutoAttempts();
     }
@@ -172,21 +243,30 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
   const login = useCallback(() => {
     if (!kc || typeof window === "undefined") {
+      logAuthEvent("auth:auto_suppressed", { reason: "missing_keycloak" });
       return;
     }
     setAuthError(null);
     setLastAuthError(null);
     resetAutoAttempts();
     syncAutoAttempts();
-    const started = maybeAutoLogin();
-    if (started) {
+    const attemptNumber = maybeAutoLogin();
+    if (attemptNumber !== null) {
+      logAuthEvent("auth:auto_attempt", {
+        attempt: attemptNumber,
+        route: currentRoute(),
+        mode: "manual",
+      });
       setPhase("authenticating");
       syncAutoAttempts();
-    } else if (getLastAuthError()) {
-      setAuthError(getLastAuthError());
-      setPhase("error");
+    } else {
+      const stored = getLastAuthError();
+      if (stored) {
+        handleAuthError(stored, "manual");
+        setPhase("error");
+      }
     }
-  }, [syncAutoAttempts]);
+  }, [handleAuthError, syncAutoAttempts]);
 
   const logout = useCallback(async () => {
     if (!kc || typeof window === "undefined") {
@@ -231,6 +311,29 @@ export function useAuth() {
     throw new Error("useAuth must be used within an AuthProvider");
   }
   return ctx;
+}
+
+function currentRoute(): string {
+  if (typeof window === "undefined") {
+    return "/";
+  }
+  return window.location.pathname || "/";
+}
+
+function logAuthEvent(event: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
+  const entry = { event, ...payload };
+  if (typeof window !== "undefined") {
+    const debugQueue = (window as typeof window & { __authDebug?: Array<Record<string, unknown>> }).__authDebug;
+    debugQueue?.push(entry);
+  }
+  const label = `[AuthLoop] ${event}`;
+  if (level === "error") {
+    // eslint-disable-next-line no-console
+    console.error(label, payload);
+  } else {
+    // eslint-disable-next-line no-console
+    console.info(label, payload);
+  }
 }
 
 function mapTokenToUser(parsed?: KeycloakTokenParsed): AuthUser | null {

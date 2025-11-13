@@ -6,6 +6,7 @@ CLIENT_ID="${KEYCLOAK_CLIENT_ID:-jira-plus-plus}"
 CLIENT_SECRET="${KEYCLOAK_CLIENT_SECRET:-change-me}"
 TEST_USERNAME="${KEYCLOAK_TEST_USERNAME:-dev-writer}"
 TEST_PASSWORD="${KEYCLOAK_TEST_PASSWORD:-password}"
+SCOPE="${KEYCLOAK_SCOPE:-}"
 TOKEN_URL="$BASE_URL/realms/$REALM/protocol/openid-connect/token"
 curl_args=(
   -sfS -X POST "$TOKEN_URL"
@@ -18,6 +19,9 @@ curl_args=(
 
 if [[ -n "${CLIENT_SECRET:-}" ]]; then
   curl_args+=(-d "client_secret=$CLIENT_SECRET")
+fi
+if [[ -n "$SCOPE" ]]; then
+  curl_args+=(-d "scope=$SCOPE")
 fi
 
 RESPONSE=$(curl "${curl_args[@]}")

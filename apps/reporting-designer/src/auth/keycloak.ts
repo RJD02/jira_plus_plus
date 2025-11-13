@@ -3,6 +3,9 @@ import Keycloak, { type KeycloakConfig, type KeycloakInstance, type KeycloakLogi
 const AUTO_ATTEMPTS_KEY = "kc:autoAttempts";
 const LAST_ERROR_KEY = "kc:lastError";
 
+const RAW_LOGIN_SCOPE = typeof import.meta.env.VITE_KC_SCOPE === "string" ? import.meta.env.VITE_KC_SCOPE : null;
+const KEYCLOAK_LOGIN_SCOPE = RAW_LOGIN_SCOPE && RAW_LOGIN_SCOPE.trim().length > 0 ? RAW_LOGIN_SCOPE.trim() : null;
+
 const resolvedConfig = resolveKeycloakConfig();
 const keycloakInitOptions = {
   onLoad: "check-sso" as const,
@@ -15,6 +18,12 @@ const keycloakInitOptions = {
 export const kc: KeycloakInstance | null = resolvedConfig ? new Keycloak(resolvedConfig) : null;
 export const MAX_AUTO_ATTEMPTS = Number(import.meta.env.VITE_KC_MAX_AUTO_ATTEMPTS ?? 1);
 let initPromise: Promise<boolean> | null = null;
+
+export type StoredAuthError = {
+  message: string;
+  code?: string | null;
+  timestamp: number;
+};
 
 export function getAutoAttempts(): number {
   return readSessionNumber(AUTO_ATTEMPTS_KEY);
@@ -36,25 +45,49 @@ export function incrementAutoAttempts(): number {
   return next;
 }
 
-export function getLastAuthError(): string | null {
+export function getLastAuthError(): StoredAuthError | null {
   if (typeof window === "undefined") {
     return null;
   }
-  return window.sessionStorage.getItem(LAST_ERROR_KEY);
+  const raw = window.sessionStorage.getItem(LAST_ERROR_KEY);
+  if (!raw) {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(raw) as StoredAuthError | { message: string };
+    if (typeof parsed === "object" && parsed && typeof parsed.message === "string") {
+      return {
+        message: parsed.message,
+        code: "code" in parsed ? (parsed as StoredAuthError).code : undefined,
+        timestamp: "timestamp" in parsed ? (parsed as StoredAuthError).timestamp : Date.now(),
+      };
+    }
+  } catch {
+    return {
+      message: raw,
+      timestamp: Date.now(),
+    };
+  }
+  return null;
 }
 
-export function setLastAuthError(message: string | null): void {
+export function setLastAuthError(details: StoredAuthError | null): void {
   if (typeof window === "undefined") {
     return;
   }
-  if (!message) {
+  if (!details) {
     window.sessionStorage.removeItem(LAST_ERROR_KEY);
     return;
   }
-  window.sessionStorage.setItem(LAST_ERROR_KEY, message);
+  const payload: StoredAuthError = {
+    message: details.message,
+    code: details.code,
+    timestamp: details.timestamp ?? Date.now(),
+  };
+  window.sessionStorage.setItem(LAST_ERROR_KEY, JSON.stringify(payload));
 }
 
-export function captureKeycloakFragmentError(): string | null {
+export function captureKeycloakFragmentError(): StoredAuthError | null {
   if (typeof window === "undefined") {
     return null;
   }
@@ -69,9 +102,10 @@ export function captureKeycloakFragmentError(): string | null {
   }
   const description = params.get("error_description");
   const message = describeAuthError(error, description);
-  setLastAuthError(message);
+  const payload: StoredAuthError = { message, code: error, timestamp: Date.now() };
+  setLastAuthError(payload);
   stripHash();
-  return message;
+  return payload;
 }
 
 export async function initKeycloak(): Promise<{ authenticated: boolean }> {
@@ -98,25 +132,28 @@ export async function initKeycloak(): Promise<{ authenticated: boolean }> {
   return { authenticated };
 }
 
-export function maybeAutoLogin(): boolean {
+export function maybeAutoLogin(): number | null {
   if (!kc || typeof window === "undefined") {
-    return false;
+    return null;
   }
   if (getLastAuthError()) {
-    return false;
+    return null;
   }
   if (getAutoAttempts() >= MAX_AUTO_ATTEMPTS) {
-    return false;
+    return null;
   }
-  incrementAutoAttempts();
+  const attempt = incrementAutoAttempts();
   const redirectUri = buildRedirectUri();
   const options: KeycloakLoginOptions & { responseMode?: "fragment" } = {
     redirectUri,
     prompt: "login",
     responseMode: "fragment",
   };
+  if (KEYCLOAK_LOGIN_SCOPE) {
+    options.scope = KEYCLOAK_LOGIN_SCOPE;
+  }
   kc.login(options);
-  return true;
+  return attempt;
 }
 
 function buildSilentCheckUri(): string | undefined {
@@ -184,7 +221,11 @@ function resolveKeycloakConfig(): KeycloakConfig | null {
   if (!url || !realm || !clientId) {
     return null;
   }
-  return { url, realm, clientId };
+  const baseConfig: KeycloakConfig & { scope?: string } = { url, realm, clientId };
+  if (KEYCLOAK_LOGIN_SCOPE) {
+    baseConfig.scope = KEYCLOAK_LOGIN_SCOPE;
+  }
+  return baseConfig;
 }
 
 function stringEnv(value: unknown): string | null {

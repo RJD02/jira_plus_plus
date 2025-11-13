@@ -28,7 +28,7 @@ export type DatasetPreviewResult = {
 
 export type MetadataCollectionRunSummary = {
   id: string;
-  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+  status: "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED";
   requestedAt: string;
   startedAt?: string | null;
   completedAt?: string | null;

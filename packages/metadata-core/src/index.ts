@@ -11,6 +11,7 @@ import {
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 
 export type MetadataLabel = string;
+export type MetadataEndpointTemplateFamily = "JDBC" | "HTTP" | "STREAM";
 
 export type MetadataEndpointFieldValueType =
   | "STRING"
@@ -48,6 +49,11 @@ export type MetadataEndpointFieldOption = {
   description?: string;
 };
 
+export type MetadataEndpointFieldVisibilityRule = {
+  field: string;
+  values: string[];
+};
+
 export type MetadataEndpointFieldDescriptor = {
   key: string;
   label: string;
@@ -60,6 +66,12 @@ export type MetadataEndpointFieldDescriptor = {
   regex?: string;
   min?: number;
   max?: number;
+  defaultValue?: string;
+  advanced?: boolean;
+  sensitive?: boolean;
+  dependsOn?: string;
+  dependsValue?: string;
+  visibleWhen?: MetadataEndpointFieldVisibilityRule[] | null;
   options?: MetadataEndpointFieldOption[];
 };
 
@@ -67,6 +79,27 @@ export type MetadataEndpointCapabilityDescriptor = {
   key: string;
   label: string;
   description?: string;
+};
+
+export type MetadataEndpointConnectionTemplateDescriptor = {
+  urlTemplate?: string;
+  defaultVerb?: string;
+};
+
+export type MetadataEndpointProbingMethodDescriptor = {
+  key: string;
+  label: string;
+  strategy: string;
+  statement?: string;
+  description?: string;
+  requires?: string[];
+  returnsVersion?: boolean;
+  returnsCapabilities?: string[];
+};
+
+export type MetadataEndpointProbingPlanDescriptor = {
+  methods: MetadataEndpointProbingMethodDescriptor[];
+  fallbackMessage?: string;
 };
 
 export type MetadataEndpointTemplateDescriptor = {
@@ -78,6 +111,7 @@ export type MetadataEndpointTemplateDescriptor = {
   domain?: string;
   categories: string[];
   protocols: string[];
+  versions?: string[];
   defaultPort?: number;
   driver?: string;
   docsUrl?: string;
@@ -86,6 +120,11 @@ export type MetadataEndpointTemplateDescriptor = {
   fields: MetadataEndpointFieldDescriptor[];
   capabilities: MetadataEndpointCapabilityDescriptor[];
   sampleConfig?: Record<string, unknown>;
+  connection?: MetadataEndpointConnectionTemplateDescriptor | null;
+  descriptorVersion?: string;
+  minVersion?: string;
+  maxVersion?: string;
+  probing?: MetadataEndpointProbingPlanDescriptor | null;
 };
 
 export type MetadataEndpointTestResult = {
@@ -251,6 +290,8 @@ export interface MetadataStore {
   listDomains(): Promise<MetadataDomainSummary[]>;
   listEndpoints(projectId?: string): Promise<MetadataEndpointDescriptor[]>;
   registerEndpoint(endpoint: MetadataEndpointDescriptor): Promise<MetadataEndpointDescriptor>;
+  listEndpointTemplates(family?: MetadataEndpointTemplateFamily): Promise<MetadataEndpointTemplateDescriptor[]>;
+  saveEndpointTemplates(templates: MetadataEndpointTemplateDescriptor[]): Promise<void>;
 }
 
 export type FileMetadataStoreOptions = {
@@ -261,6 +302,7 @@ export type FileMetadataStoreOptions = {
 const DEFAULT_DATA_DIR = path.resolve(process.cwd(), "metadata", "store");
 const RECORDS_FILE = "records.json";
 const ENDPOINTS_FILE = "endpoints.json";
+const ENDPOINT_TEMPLATES_FILE = "endpoint-templates.json";
 const DEFAULT_OBJECT_STORE_DIR = path.resolve(process.cwd(), "metadata", "objects");
 const DEFAULT_KV_STORE_FILE = path.resolve(process.cwd(), "metadata", "kv-store.json");
 const DEFAULT_JSON_STORE_DIR = path.resolve(process.cwd(), "metadata", "json");
@@ -270,11 +312,13 @@ export class FileMetadataStore implements MetadataStore {
   private readonly rootDir: string;
   private readonly recordsFile: string;
   private readonly endpointsFile: string;
+  private readonly endpointTemplatesFile: string;
 
   constructor(options?: FileMetadataStoreOptions) {
     this.rootDir = options?.rootDir ?? DEFAULT_DATA_DIR;
     this.recordsFile = path.resolve(this.rootDir, options?.filename ?? RECORDS_FILE);
     this.endpointsFile = path.resolve(this.rootDir, ENDPOINTS_FILE);
+    this.endpointTemplatesFile = path.resolve(this.rootDir, ENDPOINT_TEMPLATES_FILE);
   }
 
   async listRecords<T = Record<string, unknown>>(domain: string, filter?: RecordFilter): Promise<MetadataRecord<T>[]> {
@@ -394,6 +438,39 @@ export class FileMetadataStore implements MetadataStore {
     return descriptor;
   }
 
+  async listEndpointTemplates(family?: MetadataEndpointTemplateFamily): Promise<MetadataEndpointTemplateDescriptor[]> {
+    const templates = await this.loadEndpointTemplates();
+    return family ? templates.filter((template) => template.family === family) : templates;
+  }
+
+  async saveEndpointTemplates(templates: MetadataEndpointTemplateDescriptor[]): Promise<void> {
+    const existing = await this.loadEndpointTemplates();
+    const merged = new Map(existing.map((template) => [template.id, template]));
+    templates.forEach((template) => merged.set(template.id, template));
+    await this.persistEndpointTemplates(Array.from(merged.values()));
+  }
+
+  private async loadEndpointTemplates(): Promise<MetadataEndpointTemplateDescriptor[]> {
+    try {
+      const contents = await readFile(this.endpointTemplatesFile, "utf-8");
+      const parsed = JSON.parse(contents);
+      if (Array.isArray(parsed)) {
+        return parsed as MetadataEndpointTemplateDescriptor[];
+      }
+      return [];
+    } catch (error) {
+      if (isENOENT(error)) {
+        return [];
+      }
+      throw error;
+    }
+  }
+
+  private async persistEndpointTemplates(templates: MetadataEndpointTemplateDescriptor[]): Promise<void> {
+    await ensureParentDir(this.endpointTemplatesFile);
+    await writeFile(this.endpointTemplatesFile, JSON.stringify(templates, null, 2));
+  }
+
   private async loadRecords<T = Record<string, unknown>>(): Promise<MetadataRecord<T>[]> {
     await ensureDir(this.rootDir);
     try {
@@ -465,8 +542,16 @@ type PrismaMetadataClient = {
   metadataDomain?: {
     findMany(args?: unknown): Promise<any[]>;
   };
+  metadataProject?: {
+    findUnique(args: unknown): Promise<any | null>;
+    create(args: unknown): Promise<any>;
+  };
   metadataEndpoint: {
     findUnique?(args: unknown): Promise<any | null>;
+    findMany(args?: unknown): Promise<any[]>;
+    upsert(args: unknown): Promise<any>;
+  };
+  metadataEndpointTemplate?: {
     findMany(args?: unknown): Promise<any[]>;
     upsert(args: unknown): Promise<any>;
   };
@@ -476,9 +561,10 @@ export class PrismaMetadataStore implements MetadataStore {
   constructor(private readonly prisma: PrismaMetadataClient) {}
 
   async listRecords<T = Record<string, unknown>>(domain: string, filter?: RecordFilter): Promise<MetadataRecord<T>[]> {
+    const resolvedProjectId = await this.resolveProjectId(filter?.projectId ?? null);
     const where: Record<string, unknown> = {
       domain,
-      projectId: filter?.projectId,
+      projectId: resolvedProjectId ?? filter?.projectId,
       labels: filter?.labels?.length ? { hasEvery: filter.labels } : undefined,
     };
     const records = await this.prisma.metadataRecord.findMany({
@@ -505,18 +591,19 @@ export class PrismaMetadataStore implements MetadataStore {
   }
 
   async upsertRecord<T = Record<string, unknown>>(input: MetadataRecordInput<T>): Promise<MetadataRecord<T>> {
+    const ensuredProjectId = await this.ensureProject(input.projectId);
     if (input.id) {
       const upserted = await this.prisma.metadataRecord.upsert({
         where: { id: input.id },
         update: {
-          projectId: input.projectId,
+          projectId: ensuredProjectId,
           domain: input.domain,
           labels: input.labels ?? [],
           payload: input.payload,
         },
         create: {
           id: input.id,
-          projectId: input.projectId,
+          projectId: ensuredProjectId,
           domain: input.domain,
           labels: input.labels ?? [],
           payload: input.payload,
@@ -526,7 +613,7 @@ export class PrismaMetadataStore implements MetadataStore {
     }
     const created = await this.prisma.metadataRecord.create({
       data: {
-        projectId: input.projectId,
+        projectId: ensuredProjectId,
         domain: input.domain,
         labels: input.labels ?? [],
         payload: input.payload,
@@ -579,8 +666,9 @@ export class PrismaMetadataStore implements MetadataStore {
   }
 
   async listEndpoints(projectId?: string): Promise<MetadataEndpointDescriptor[]> {
+    const resolvedProjectId = await this.resolveProjectId(projectId ?? null);
     const endpoints = await this.prisma.metadataEndpoint.findMany({
-      where: projectId ? { projectId } : undefined,
+      where: resolvedProjectId ? { projectId: resolvedProjectId } : undefined,
     });
     return endpoints.map(mapPrismaEndpoint);
   }
@@ -589,6 +677,7 @@ export class PrismaMetadataStore implements MetadataStore {
     const endpointId = endpoint.id ?? cryptoRandomId();
     const normalizedSourceId =
       endpoint.sourceId && endpoint.sourceId.trim().length > 0 ? endpoint.sourceId.trim() : undefined;
+    const ensuredProjectId = await this.ensureProject(endpoint.projectId ?? null);
     const result = await this.prisma.metadataEndpoint.upsert({
       where: { id: endpointId },
       update: {
@@ -597,7 +686,7 @@ export class PrismaMetadataStore implements MetadataStore {
         verb: endpoint.verb,
         url: endpoint.url,
         authPolicy: endpoint.authPolicy ?? null,
-        projectId: endpoint.projectId ?? null,
+        projectId: ensuredProjectId,
         domain: endpoint.domain ?? null,
         labels: endpoint.labels ?? (endpoint.domain ? [endpoint.domain] : []),
         config: endpoint.config ?? null,
@@ -614,7 +703,7 @@ export class PrismaMetadataStore implements MetadataStore {
         verb: endpoint.verb,
         url: endpoint.url,
         authPolicy: endpoint.authPolicy ?? null,
-        projectId: endpoint.projectId ?? null,
+        projectId: ensuredProjectId,
         domain: endpoint.domain ?? null,
         labels: endpoint.labels ?? (endpoint.domain ? [endpoint.domain] : []),
         config: endpoint.config ?? null,
@@ -624,6 +713,105 @@ export class PrismaMetadataStore implements MetadataStore {
       },
     });
     return mapPrismaEndpoint(result);
+  }
+
+  async listEndpointTemplates(family?: MetadataEndpointTemplateFamily): Promise<MetadataEndpointTemplateDescriptor[]> {
+    const templateClient = this.prisma.metadataEndpointTemplate;
+    if (!templateClient?.findMany) {
+      return [];
+    }
+    const templates = await templateClient.findMany({
+      where: family ? { family } : undefined,
+    });
+    return templates.map(mapPrismaEndpointTemplate);
+  }
+
+  async saveEndpointTemplates(templates: MetadataEndpointTemplateDescriptor[]): Promise<void> {
+    const templateClient = this.prisma.metadataEndpointTemplate;
+    if (!templateClient?.upsert) {
+      return;
+    }
+    await Promise.all(
+      templates.map((template) =>
+        templateClient.upsert({
+          where: { id: template.id },
+          update: {
+            family: template.family,
+            title: template.title,
+            vendor: template.vendor,
+            descriptor: template,
+          },
+          create: {
+            id: template.id,
+            family: template.family,
+            title: template.title,
+            vendor: template.vendor,
+            descriptor: template,
+          },
+        }),
+      ),
+    );
+  }
+
+  private async ensureProject(projectId?: string | null): Promise<string | null> {
+    if (!projectId) {
+      return null;
+    }
+    const normalized = projectId.trim();
+    if (!normalized.length) {
+      return null;
+    }
+    const projectClient = this.prisma.metadataProject;
+    if (!projectClient?.findUnique || !projectClient?.create) {
+      return normalized;
+    }
+    const resolved = await this.resolveProjectId(normalized);
+    if (resolved && resolved !== normalized) {
+      return resolved;
+    }
+    if (resolved === normalized) {
+      const exists = await projectClient.findUnique({ where: { id: normalized } });
+      if (exists) {
+        return normalized;
+      }
+    }
+    const slug = slugify(normalized);
+    const existingBySlug = await projectClient.findUnique({ where: { slug } });
+    if (existingBySlug) {
+      return existingBySlug.id ?? normalized;
+    }
+    await projectClient.create({
+      data: {
+        id: normalized,
+        slug,
+        displayName: normalized,
+      },
+    });
+    return normalized;
+  }
+
+  private async resolveProjectId(projectId?: string | null): Promise<string | null> {
+    if (!projectId) {
+      return null;
+    }
+    const normalized = projectId.trim();
+    if (!normalized.length) {
+      return null;
+    }
+    const projectClient = this.prisma.metadataProject;
+    if (!projectClient?.findUnique) {
+      return normalized;
+    }
+    const existing = await projectClient.findUnique({ where: { id: normalized } });
+    if (existing) {
+      return normalized;
+    }
+    const slug = slugify(normalized);
+    const existingBySlug = await projectClient.findUnique({ where: { slug } });
+    if (existingBySlug) {
+      return existingBySlug.id ?? normalized;
+    }
+    return normalized;
   }
 }
 
@@ -663,6 +851,17 @@ function mapPrismaEndpoint(endpoint: any): MetadataEndpointDescriptor {
       endpoint.updatedAt instanceof Date
         ? endpoint.updatedAt.toISOString()
         : new Date(endpoint.updatedAt ?? Date.now()).toISOString(),
+  };
+}
+
+function mapPrismaEndpointTemplate(template: any): MetadataEndpointTemplateDescriptor {
+  const descriptor = (template.descriptor ?? {}) as MetadataEndpointTemplateDescriptor;
+  return {
+    ...descriptor,
+    id: descriptor.id ?? template.id,
+    family: descriptor.family ?? template.family,
+    title: descriptor.title ?? template.title,
+    vendor: descriptor.vendor ?? template.vendor,
   };
 }
 

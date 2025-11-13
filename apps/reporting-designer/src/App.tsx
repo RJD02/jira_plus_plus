@@ -778,16 +778,17 @@ export function App() {
     }
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
+  const auth = useAuth();
   const registryClient = useMemo(
     () =>
       createGraphQLReportingRegistryClient({
         endpoint: "/api/graphql",
         tenantId: TENANT_HEADER,
         fetchImpl: fetch,
+        headers: auth.token ? { Authorization: `Bearer ${auth.token}` } : undefined,
       }),
-    [],
+    [auth.token],
   );
-  const auth = useAuth();
   const { metadataClient, metadataClientError } = useMemo(() => {
     try {
       const headersProvider = () => (auth.token ? { Authorization: `Bearer ${auth.token}` } : undefined);
@@ -1439,7 +1440,10 @@ export function App() {
         return [detail.conversation, ...remaining];
       });
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setConversationLoading(false);
       setDismissedSuggestionIds([]);
@@ -1585,7 +1589,10 @@ export function App() {
         }
       } catch (error) {
         if ((error as Error).name !== "AbortError") {
-          setActionError((error as Error).message);
+          const normalized = normalizeActionErrorMessage(error);
+          if (normalized) {
+            setActionError(normalized);
+          }
         }
       } finally {
         if (!controller.signal.aborted) {
@@ -1795,7 +1802,10 @@ export function App() {
         personaTags: "",
       });
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setCreatingDefinition(false);
     }
@@ -1844,7 +1854,10 @@ export function App() {
       if (error instanceof SyntaxError) {
         setActionError("Default filters must be valid JSON.");
       } else {
-        setActionError((error as Error).message);
+        const normalized = normalizeActionErrorMessage(error);
+        if (normalized) {
+          setActionError(normalized);
+        }
       }
     } finally {
       setSavingDraft(false);
@@ -1869,7 +1882,10 @@ export function App() {
       setIsDrafting(false);
       setStatusMessage("Version published.");
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setPublishing(false);
     }
@@ -1887,7 +1903,10 @@ export function App() {
       setStatusMessage(`Preview run queued (run id ${run.metadata?.runId ?? "unknown"}).`);
       void refreshRuns(selectedVersionId);
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setRunningReport(false);
     }
@@ -1945,7 +1964,10 @@ export function App() {
         };
         setConversationMessages((prev) => [...prev, fallbackMessage]);
       }
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setAgentProcessing(false);
     }
@@ -2057,7 +2079,10 @@ export function App() {
       setConversationMessages([]);
       setNewConversationPersona("");
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       setStartingConversation(false);
     }
@@ -2209,7 +2234,10 @@ export function App() {
           : `Saved dashboard draft (v${versionFragment}).`,
       );
     } catch (error) {
-      setActionError((error as Error).message);
+      const normalized = normalizeActionErrorMessage(error);
+      if (normalized) {
+        setActionError(normalized);
+      }
     } finally {
       if (options.publish) {
         setPublishingDashboard(false);
@@ -3939,7 +3967,7 @@ const renderManualEditor = () => {
 
   const renderTopControls = () => null;
 
-  const metadataPersona = newConversationPersona.trim() || dashboardPersona || currentDefinition?.personaTags?.[0] || null;
+const metadataPersona = newConversationPersona.trim() || dashboardPersona || currentDefinition?.personaTags?.[0] || null;
   const metadataDefinitions = useMemo(
     () => definitions.map((definition) => ({ id: definition.id, name: definition.name, personaTags: definition.personaTags })),
     [definitions],
@@ -3997,6 +4025,26 @@ const renderManualEditor = () => {
 }
 
 export default App;
+
+function normalizeActionErrorMessage(error: unknown): string | null {
+  const message =
+    error instanceof Error
+      ? error.message
+      : typeof error === "string"
+        ? error
+        : null;
+  if (!message) {
+    return null;
+  }
+  if (/authentication required/i.test(message)) {
+    if (typeof console !== "undefined") {
+      // eslint-disable-next-line no-console
+      console.info("[Designer] Suppressing upstream auth error", message);
+    }
+    return null;
+  }
+  return message;
+}
 
 function DocumentPanelComponent({
   activeTab,

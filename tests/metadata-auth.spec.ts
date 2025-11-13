@@ -45,6 +45,7 @@ test("metadata console requires Keycloak login and loads workspace nav", async (
   await expect(metadataTab).toBeVisible({ timeout: 20_000 });
   await metadataTab.click();
   await expect(page.getByTestId("metadata-register-open").first()).toBeVisible();
+  await expect(page.locator("text=/Authentication required/i")).toHaveCount(0);
 });
 
 test("metadata workspace sections render datasets, endpoints, and collections", async ({ page }) => {
@@ -96,4 +97,26 @@ test("metadata workspace sections render datasets, endpoints, and collections", 
 
   await page.locator("[data-testid='metadata-register-open']").first().click();
   await expect(page.locator("[data-testid='metadata-register-form']")).toBeVisible();
+});
+
+test("postgres template connection test succeeds", async ({ page }) => {
+  await loginViaKeycloak(page);
+  await page.getByRole("button", { name: "Metadata" }).click();
+  await page.locator("[data-testid='metadata-register-open']").first().click();
+  await expect(page.locator("[data-testid='metadata-register-form']")).toBeVisible();
+
+  await page.getByRole("button", { name: "JDBC" }).click();
+  await page.getByRole("button", { name: /PostgreSQL/i }).first().click();
+
+  await page.getByLabel(/Endpoint name/i).fill("Playwright Postgres Endpoint");
+  await page.getByLabel(/Host/i).fill(process.env.METADATA_PG_HOST ?? "localhost");
+  await page.getByLabel(/Port/i).fill(process.env.METADATA_PG_PORT ?? "5432");
+  await page.getByLabel(/Database/i).fill(process.env.METADATA_PG_DATABASE ?? "jira_plus_plus");
+  await page.getByLabel(/Username/i).fill(process.env.METADATA_PG_USERNAME ?? "postgres");
+  await page.getByLabel(/Password/i).fill(process.env.METADATA_PG_PASSWORD ?? "postgres");
+  await page.getByLabel(/Schemas/i).fill(process.env.METADATA_PG_SCHEMAS ?? "public");
+
+  await page.getByRole("button", { name: /Test connection/i }).click();
+  await expect(page.locator("text=Connection parameters validated.")).toBeVisible({ timeout: 20_000 });
+  await expect(page.locator("text=/Write access denied/i")).toHaveCount(0);
 });

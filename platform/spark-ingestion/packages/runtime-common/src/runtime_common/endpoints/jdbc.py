@@ -281,7 +281,7 @@ class JdbcEndpoint(SourceEndpoint, SupportsQueryExecution):
         missing = [field.key for field in cls.descriptor_fields() if field.required and not normalized.get(field.key)]
         if missing:
             return EndpointTestResult(False, f"Missing required fields: {', '.join(missing)}")
-        return EndpointTestResult(True, "Parameters validated.")
+        return EndpointTestResult(True, "Connection parameters validated.")
 
     @classmethod
     def _normalize_parameters(cls, parameters: Dict[str, Any]) -> Dict[str, str]:

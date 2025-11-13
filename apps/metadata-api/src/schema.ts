@@ -1,8 +1,15 @@
 import { randomUUID } from "node:crypto";
 import { GraphQLScalarType } from "graphql";
 import { DateTimeResolver, JSONResolver } from "graphql-scalars";
-import type { MetadataStore, MetadataEndpointDescriptor, MetadataRecordInput, MetadataRecord, HttpVerb } from "@metadata/core";
-import type { EndpointBuildResult, EndpointTestResult } from "./types.js";
+import type {
+  MetadataStore,
+  MetadataEndpointDescriptor,
+  MetadataEndpointTemplateDescriptor,
+  MetadataRecordInput,
+  MetadataRecord,
+  HttpVerb,
+} from "@metadata/core";
+import type { EndpointBuildResult, EndpointTemplate, EndpointTestResult } from "./types.js";
 import { getPrismaClient } from "./prismaClient.js";
 import { getTemporalClient } from "./temporal/client.js";
 import { WORKFLOW_NAMES } from "./temporal/workflows.js";
@@ -125,6 +132,7 @@ export const typeDefs = `#graphql
     RUNNING
     SUCCEEDED
     FAILED
+    SKIPPED
   }
 
   type MetadataCollectionRun {
@@ -397,12 +405,28 @@ export function createResolvers(store: MetadataStore) {
         });
       },
       metadataEndpointTemplates: async (_parent: unknown, args: { family?: "JDBC" | "HTTP" | "STREAM" }) => {
-        const { client, taskQueue } = await getTemporalClient();
-        return client.workflow.execute(WORKFLOW_NAMES.listEndpointTemplates, {
-          taskQueue,
-          workflowId: `metadata-endpoint-templates-${randomUUID()}`,
-          args: [{ family: args.family }],
-        });
+        const cached = (await store.listEndpointTemplates(args.family)) as unknown as EndpointTemplate[];
+        try {
+          const { client, taskQueue } = await getTemporalClient();
+          const templates = await client.workflow.execute(WORKFLOW_NAMES.listEndpointTemplates, {
+            taskQueue,
+            workflowId: `metadata-endpoint-templates-${randomUUID()}`,
+            args: [{ family: args.family }],
+          });
+          if (Array.isArray(templates) && templates.length > 0) {
+            await store.saveEndpointTemplates(
+              templates.map((template) => template as unknown as MetadataEndpointTemplateDescriptor),
+            );
+            return args.family ? templates.filter((template) => template.family === args.family) : templates;
+          }
+          return cached;
+        } catch (error) {
+          console.warn("[metadata.endpointTemplates] refresh failed; falling back to cached descriptors", error);
+          if (cached.length > 0) {
+            return cached;
+          }
+          throw error;
+        }
       },
     },
     Mutation: {
@@ -420,47 +444,71 @@ export function createResolvers(store: MetadataStore) {
       },
       registerMetadataEndpoint: async (_parent: unknown, args: { input: GraphQLMetadataEndpointInput }, ctx: ResolverContext) => {
         enforceWriteAccess(ctx);
-        const templateId = parseTemplateId(args.input.config);
-        let built: EndpointBuildResult | undefined;
-        let testResult: EndpointTestResult | null = null;
-        let templateParameters: Record<string, string> = {};
-        if (templateId) {
-          templateParameters = parseTemplateParameters(args.input.config);
-          const { client, taskQueue } = await getTemporalClient();
-          built = await client.workflow.execute(WORKFLOW_NAMES.buildEndpointConfig, {
-            taskQueue,
-            workflowId: `metadata-endpoint-build-${randomUUID()}`,
-            args: [{ templateId, parameters: templateParameters, extras: { labels: args.input.labels ?? undefined } }],
+        let templateId: string | null = null;
+        try {
+          templateId = parseTemplateId(args.input.config);
+          let built: EndpointBuildResult | undefined;
+          let testResult: EndpointTestResult | null = null;
+          let templateParameters: Record<string, string> = {};
+          if (templateId) {
+            templateParameters = parseTemplateParameters(args.input.config);
+            const { client, taskQueue } = await getTemporalClient();
+            built = await client.workflow.execute(WORKFLOW_NAMES.buildEndpointConfig, {
+              taskQueue,
+              workflowId: `metadata-endpoint-build-${randomUUID()}`,
+              args: [{ templateId, parameters: templateParameters, extras: { labels: args.input.labels ?? undefined } }],
+            });
+            testResult = await tryTestEndpointTemplate(client, taskQueue, templateId, templateParameters);
+          }
+
+          const url = built?.url ?? args.input.url;
+          if (!url) {
+            throw new Error("Endpoint URL is required.");
+          }
+          const versionHint =
+            extractVersionHint(templateParameters) ?? extractVersionHintFromConfig(args.input.config) ?? undefined;
+
+          const detectedVersion = testResult?.detectedVersion ?? undefined;
+          const resolvedCapabilities =
+            testResult?.capabilities && testResult.capabilities.length > 0 ? testResult.capabilities : ["metadata"];
+
+          const descriptor: MetadataEndpointDescriptor = {
+            id: args.input.id ?? undefined,
+            sourceId: args.input.sourceId ?? undefined,
+            name: args.input.name,
+            description: args.input.description ?? undefined,
+            verb: ((args.input.verb as HttpVerb | undefined) ?? built?.verb ?? "POST") as HttpVerb,
+            url,
+            authPolicy: args.input.authPolicy ?? undefined,
+            projectId: args.input.projectId ?? ctx.auth.projectId ?? undefined,
+            domain: args.input.domain ?? built?.domain ?? undefined,
+            labels: built?.labels ?? args.input.labels ?? undefined,
+            config: built?.config ?? args.input.config ?? undefined,
+            detectedVersion,
+            versionHint,
+            capabilities: resolvedCapabilities,
+            deletedAt: null,
+            deletionReason: undefined,
+          };
+          const saved = await store.registerEndpoint(descriptor);
+          emitMetadataMetric("metadata.endpoint.register.success", {
+            endpointId: saved.id,
+            templateId,
+            detectedVersion: saved.detectedVersion ?? null,
+            capabilities: saved.capabilities ?? [],
           });
-          testResult = await tryTestEndpointTemplate(client, taskQueue, templateId, templateParameters);
+          return saved;
+        } catch (error) {
+          emitMetadataMetric(
+            "metadata.endpoint.register.failures",
+            {
+              templateId,
+              message: error instanceof Error ? error.message : String(error),
+            },
+            "error",
+          );
+          throw error;
         }
-
-        const url = built?.url ?? args.input.url;
-        if (!url) {
-          throw new Error("Endpoint URL is required.");
-        }
-        const versionHint =
-          extractVersionHint(templateParameters) ?? extractVersionHintFromConfig(args.input.config) ?? undefined;
-
-        const descriptor: MetadataEndpointDescriptor = {
-          id: args.input.id ?? undefined,
-          sourceId: args.input.sourceId ?? undefined,
-          name: args.input.name,
-          description: args.input.description ?? undefined,
-          verb: ((args.input.verb as HttpVerb | undefined) ?? built?.verb ?? "POST") as HttpVerb,
-          url,
-          authPolicy: args.input.authPolicy ?? undefined,
-          projectId: args.input.projectId ?? ctx.auth.projectId ?? undefined,
-          domain: args.input.domain ?? built?.domain ?? undefined,
-          labels: built?.labels ?? args.input.labels ?? undefined,
-          config: built?.config ?? args.input.config ?? undefined,
-          detectedVersion: testResult?.detectedVersion ?? undefined,
-          versionHint,
-          capabilities: testResult?.capabilities ?? undefined,
-          deletedAt: null,
-          deletionReason: undefined,
-        };
-        return store.registerEndpoint(descriptor);
       },
       deleteMetadataEndpoint: async (_parent: unknown, args: { id: string; reason?: string | null }, ctx: ResolverContext) => {
         enforceWriteAccess(ctx);
@@ -553,6 +601,9 @@ export function createResolvers(store: MetadataStore) {
         const endpoint = await prisma.metadataEndpoint.findUnique({ where: { id: sourceEndpointId } });
         if (!endpoint || !endpoint.url) {
           throw new Error("Source endpoint is not registered or missing connection URL");
+        }
+        if (Array.isArray(endpoint.capabilities) && endpoint.capabilities.length > 0 && !endpoint.capabilities.includes("preview")) {
+          throw new Error("Endpoint does not expose the `preview` capability required for dataset previews.");
         }
         const { client, taskQueue } = await getTemporalClient();
         return client.workflow.execute(WORKFLOW_NAMES.previewDataset, {
@@ -766,6 +817,15 @@ function extractVersionHintFromConfig(config?: Record<string, unknown> | null): 
   return extractVersionHint(normalized);
 }
 
+function emitMetadataMetric(event: string, payload: Record<string, unknown>, level: "info" | "error" = "info") {
+  const label = `[metadata] ${event}`;
+  if (level === "error") {
+    console.error(label, payload);
+  } else {
+    console.info(label, payload);
+  }
+}
+
 type GraphQLMetadataRecordInput = {
   id?: string | null;
   projectId: string;
@@ -844,7 +904,7 @@ type MetadataCollectionRunFilter = {
   status?: MetadataCollectionStatus | null;
 };
 
-type MetadataCollectionStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED";
+type MetadataCollectionStatus = "QUEUED" | "RUNNING" | "SUCCEEDED" | "FAILED" | "SKIPPED";
 
 function mapCatalogRecordToDataset(record: MetadataRecord<unknown>): CatalogDataset | null {
   const payload = normalizePayload(record.payload) ?? {};
