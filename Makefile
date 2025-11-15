@@ -5,4 +5,4 @@ PNPM ?= corepack pnpm
 ci-check: smoke
 
 smoke:
-	$(PNPM) check:metadata-lifecycle
+	$(PNPM) check:metadata-auth

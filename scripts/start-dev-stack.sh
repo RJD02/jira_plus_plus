@@ -35,7 +35,6 @@ if [[ -f "$KEYCLOAK_SYNC_SCRIPT" ]]; then
 fi
 start_component "core api" "$PROJECT_ROOT/scripts/start-core-api-bg.sh"
 start_component "reporting api" "$PROJECT_ROOT/scripts/start-reporting-api-bg.sh"
-start_component "metadata api" "$PROJECT_ROOT/scripts/start-metadata-api-bg.sh"
 start_component "web app" "$PROJECT_ROOT/scripts/start-web-bg.sh"
 start_component "designer" "$PROJECT_ROOT/scripts/start-designer-bg.sh"
 

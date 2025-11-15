@@ -242,52 +242,6 @@ importers:
         specifier: ^1.4.0
         version: 1.6.1(@types/node@20.19.23)(terser@5.44.0)
 
-  apps/metadata-api:
-    dependencies:
-      '@apollo/server':
-        specifier: ^4.10.0
-        version: 4.12.2(graphql@16.11.0)
-      '@metadata/core':
-        specifier: workspace:*
-        version: link:../../packages/metadata-core
-      '@prisma/client':
-        specifier: ^5.22.0
-        version: 5.22.0(prisma@5.22.0)
-      '@temporalio/client':
-        specifier: ^1.13.1
-        version: 1.13.1
-      '@temporalio/worker':
-        specifier: ^1.13.1
-        version: 1.13.1
-      '@temporalio/workflow':
-        specifier: ^1.13.1
-        version: 1.13.1
-      execa:
-        specifier: ^8.0.1
-        version: 8.0.1
-      graphql:
-        specifier: ^16.8.1
-        version: 16.11.0
-      graphql-scalars:
-        specifier: ^1.25.0
-        version: 1.25.0(graphql@16.11.0)
-      jose:
-        specifier: ^5.2.4
-        version: 5.10.0
-    devDependencies:
-      '@types/node':
-        specifier: ^20.11.30
-        version: 20.19.23
-      prisma:
-        specifier: ^5.22.0
-        version: 5.22.0
-      tsx:
-        specifier: ^4.7.1
-        version: 4.20.6
-      typescript:
-        specifier: ^5.4.5
-        version: 5.9.3
-
   apps/reporting-api:
     dependencies:
       '@apollo/server':
@@ -3886,9 +3840,6 @@ packages:
   jiti@1.21.7:
     resolution: {integrity: sha512-/imKNG4EbWNrVjoNC/1H5/9GFy+tqjGBHCaSsN+P2RnPqjsLmv6UD3Ej+Kj8nBWaRAwyk7kK5ZUc+OEatnTR3A==}
     hasBin: true
-
-  jose@5.10.0:
-    resolution: {integrity: sha512-s+3Al/p9g32Iq+oqXxkW//7jk2Vig6FF1CFqzVXoTUXt2qz89YWbL+OwS17NFYEvxC35n0FKeGO2LGYSxeM2Gg==}
 
   js-sha256@0.10.1:
     resolution: {integrity: sha512-5obBtsz9301ULlsgggLg542s/jqtddfOpV5KJc4hajc9JV8GeY2gZHSVpYBn4nWqAUTJ9v+xwtbJ1mIBgIH5Vw==}
@@ -9852,8 +9803,6 @@ snapshots:
       supports-color: 8.1.1
 
   jiti@1.21.7: {}
-
-  jose@5.10.0: {}
 
   js-sha256@0.10.1: {}
 

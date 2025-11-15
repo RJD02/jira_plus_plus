@@ -1327,7 +1327,7 @@ export function App() {
   const [showFiltersEditor, setShowFiltersEditor] = useState<boolean>(false);
   const [showNotesEditor, setShowNotesEditor] = useState<boolean>(false);
   const [navExpanded, setNavExpanded] = useState<boolean>(false);
-  const [activeWorkspace, setActiveWorkspace] = useState<"designer" | "metadata">("designer");
+  const [activeWorkspace, setActiveWorkspace] = useState<"designer" | "metadata">("metadata");
   const [toolbarMenuOpen, setToolbarMenuOpen] = useState<boolean>(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState<boolean>(false);
   const [commandQuery, setCommandQuery] = useState<string>("");
@@ -2352,14 +2352,6 @@ export function App() {
 
   const iconRailItems = [
     {
-      id: "designer",
-      icon: "🎨",
-      label: "Designer",
-      active: activeWorkspace === "designer",
-      disabled: false,
-      onSelect: () => setActiveWorkspace("designer"),
-    },
-    {
       id: "metadata",
       icon: "🧭",
       label: "Metadata",
@@ -2402,7 +2394,7 @@ export function App() {
             <div className="flex h-11 w-11 items-center justify-center rounded-2xl bg-white/10 text-xl text-white shadow-inner shadow-black/40">
               ✦
             </div>
-            {navExpanded ? <span className="text-sm font-semibold text-white">Designer</span> : null}
+            {navExpanded ? <span className="text-sm font-semibold text-white">Nucleus</span> : null}
           </div>
           {navExpanded ? (
             <button
