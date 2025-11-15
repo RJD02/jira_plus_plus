@@ -52,6 +52,8 @@ model MetadataEndpoint {
   runs        MetadataCollectionRun[]
   createdAt   DateTime          @default(now())
   updatedAt   DateTime          @updatedAt
+  deletedAt   DateTime?
+  deletionReason String?
 
   @@index([projectId])
 }

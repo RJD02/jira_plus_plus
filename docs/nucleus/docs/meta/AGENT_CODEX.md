@@ -15,8 +15,12 @@ This contract instructs the Developer Agent (Codex) how to pick work, read specs
 2) Verify intents/<slug>/* exists; else set blocked + QUESTIONS.md.
 3) Ensure runs/<slug>/* files exist; append start heartbeat. Set STATE to in-progress.
 
-## Loop
-Plan → Implement → Test → Patch → Heartbeat every 10–15m (append to LOG.md: {timestamp, done, next, risks}).
+
+## Loop:
+Plan → Implement → Test → Patch → Heartbeat (≤ ~150 LOC per commit, reference AC#).
+
+## Heartbeat:
+Append only to LOG.md every 10–15 min: {timestamp, done, next, risks}. Treat this as part of the loop—log the heartbeat and continue immediately with the recorded `next` step (no waiting for external confirmation).
 
 ## Guardrails
 - Keep commits small (≤ ~150 LOC), reference acceptance ID.

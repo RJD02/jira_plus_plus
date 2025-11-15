@@ -64,6 +64,8 @@ export type CatalogRecordInput = {
 
 const CATALOG_DATASET_DOMAIN = "catalog.dataset";
 
+type PrismaClient = Awaited<ReturnType<typeof getPrismaClient>>;
+
 export const activities: MetadataActivities = {
   async markRunStarted({
     runId,
@@ -75,15 +77,12 @@ export const activities: MetadataActivities = {
     temporalRunId: string;
   }) {
     const prisma = await getPrismaClient();
-    await prisma.metadataCollectionRun.update({
-      where: { id: runId },
-      data: {
-        status: "RUNNING",
-        startedAt: new Date(),
-        workflowId,
-        temporalRunId,
-        error: null,
-      },
+    await updateRunOrWarn(prisma, runId, {
+      status: "RUNNING",
+      startedAt: new Date(),
+      workflowId,
+      temporalRunId,
+      error: null,
     });
   },
   async persistCatalogRecords({
@@ -138,35 +137,26 @@ export const activities: MetadataActivities = {
   },
   async markRunCompleted({ runId }: { runId: string }) {
     const prisma = await getPrismaClient();
-    await prisma.metadataCollectionRun.update({
-      where: { id: runId },
-      data: {
-        status: "SUCCEEDED",
-        completedAt: new Date(),
-        error: null,
-      },
+    await updateRunOrWarn(prisma, runId, {
+      status: "SUCCEEDED",
+      completedAt: new Date(),
+      error: null,
     });
   },
   async markRunSkipped({ runId, reason }: { runId: string; reason: string }) {
     const prisma = await getPrismaClient();
-    await prisma.metadataCollectionRun.update({
-      where: { id: runId },
-      data: {
-        status: "SKIPPED",
-        completedAt: new Date(),
-        error: reason,
-      },
+    await updateRunOrWarn(prisma, runId, {
+      status: "SKIPPED",
+      completedAt: new Date(),
+      error: reason,
     });
   },
   async markRunFailed({ runId, error }: { runId: string; error: string }) {
     const prisma = await getPrismaClient();
-    await prisma.metadataCollectionRun.update({
-      where: { id: runId },
-      data: {
-        status: "FAILED",
-        completedAt: new Date(),
-        error,
-      },
+    await updateRunOrWarn(prisma, runId, {
+      status: "FAILED",
+      completedAt: new Date(),
+      error,
     });
   },
   async prepareCollectionJob({ runId }: { runId: string }) {
@@ -339,6 +329,21 @@ function slugifyProjectId(input: string): string {
   const normalized = input.trim().toLowerCase();
   const slug = normalized.replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
   return slug || normalized || "project";
+}
+
+async function updateRunOrWarn(
+  prisma: PrismaClient,
+  runId: string,
+  data: Record<string, unknown>,
+): Promise<void> {
+  const result = await prisma.metadataCollectionRun.updateMany({
+    where: { id: runId },
+    data,
+  });
+  if (result.count === 0 && process.env.NODE_ENV !== "test") {
+    // eslint-disable-next-line no-console
+    console.warn(`[metadata] collection run ${runId} not found while updating status; skipping`);
+  }
 }
 
 async function loadRecords(records?: CatalogRecordInput[] | null, recordsPath?: string | null): Promise<CatalogRecordInput[]> {

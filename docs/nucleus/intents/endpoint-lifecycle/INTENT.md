@@ -1,46 +1,47 @@
-# Endpoint Lifecycle Management (GraphQL)
-
-* title: Endpoint Lifecycle Management (GraphQL)
+* title: Endpoint lifecycle (CRUD, collections, soft delete, E2E verification)
 * slug: endpoint-lifecycle
 * type: feature
-* context: Designer SPA (Metadata Workspace), GraphQL API, Prisma models (MetadataProject/Endpoint/Record/Run), Temporal workers, Keycloak roles
-* why_now: Finish the Endpoints section with full CRUD, capability-aware actions, and dataset visibility on detail view
+* context:
+
+  * apps/metadata-api (GraphQL resolvers, Temporal integration, Prisma models)
+  * apps/designer (Metadata Workspace: Endpoints list, detail, datasets, Catalog)
+  * prisma/metadata (MetadataEndpoint, MetadataRecord, MetadataCollectionRun)
+* why_now: Endpoint CRUD and collection triggers exist in pieces but lack a complete, validated end-to-end flow. Missing soft-delete semantics and lack of UI-state rigor lead to issues like infinite loading, stale datasets, and unverified collection behavior.
 * scope_in:
 
-  * List & filter endpoints; open Detail view
-  * Register endpoint via template-driven form (JDBC/HTTP/Streaming)
-  * **GraphQL** `testEndpoint` before create/update
-  * Edit endpoint; re-test on connection changes
-  * Delete endpoint with active-run guard
-  * Trigger collections; show latest run state on cards
-  * **Detail page lists datasets produced by the endpoint**
-  * Capability-aware UI/guards (`metadata`, `preview`, `profiles`)
-  * Keycloak role enforcement (`viewer`, `editor`, `admin`)
+  * Create endpoint using JDBC Postgres template (provided parameters)
+  * Auto-trigger initial metadata collection on registration
+  * List endpoints (active only), view details, view datasets
+  * Manual “Trigger Collection” and run-chip visibility
+  * Edit credentials: wrong → test/trigger fail; correct → test/trigger succeed
+  * Soft delete endpoint: hide from list, block triggers, hide datasets, preserve run history
+  * Apply ADR-0001 UI State Contract to list/detail/datasets pages
 * scope_out:
 
-  * Authoring new connector drivers
-  * Advanced schedule UI (separate intent)
+  * Hard delete or archival workflows
+  * Advanced scheduling / cron
+  * Connector-driver development
 * acceptance:
 
-  1. Create requires passing `testEndpoint`.
-  2. New endpoint appears immediately in list.
-  3. Edit persists; re-test required when connection fields change.
-  4. Delete blocked while a collection is RUNNING.
-  5. Role matrix enforced at API and UI.
-  6. Capability misuse fails closed with error codes.
-  7. Triggered collections surface run chips on cards/detail.
-  8. Detail page shows datasets for the endpoint (records labeled `endpoint:<endpointId>`).
+  1. Create endpoint from given Postgres template → auto collection succeeds, datasets appear.
+  2. Manual Trigger Collection creates a run and surfaces in UI.
+  3. Editing endpoint with wrong password → test & trigger fail with proper errors.
+  4. Restoring correct password → test & trigger succeed.
+  5. Soft delete removes endpoint from list, hides datasets, blocks triggers, preserves run history.
+  6. All endpoint views follow UI State Contract (loading → data/empty/error/auth).
 * constraints:
 
-  * Artifacts must follow **INTENT** and **SPEC** schemas for agent parsing.
-  * Secrets never echoed; URIs masked in UI
-  * Zero-downtime migration; no model renames
+  * INTENT/SPEC format compliance
+  * Additive DB migration only (soft delete)
+  * No secrets in logs or error payloads
+  * CI (< 8 minutes)
 * non_negotiables:
 
-  * If `test/trigger` GraphQL mutations and Temporal wiring already work, leave them as-is and only bind UI.
-  * Never log secrets; redact in diagnostics.
+  * Must fail-closed on capability/auth errors
+  * Soft-deleted endpoints must never appear in list or Catalog datasets
+  * No infinite loading states in any endpoint view
 * refs:
 
-  * SPEC & ACCEPTANCE in this folder
-  * ADR for role → permission mapping (optional)
+  * docs/meta/ADR-0001-ui-state-contract.md
+  * intents/endpoint-list-authz-bug/*
 * status: ready

@@ -7,6 +7,7 @@ import { authenticateRequest } from "./auth.js";
 
 async function main() {
   const store = await getMetadataStore();
+  console.info("[metadata-api] using store", store.constructor?.name ?? "unknown");
   const resolvers = createResolvers(store);
 
   const server = new ApolloServer({

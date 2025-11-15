@@ -1,5 +1,5 @@
 export const METADATA_OVERVIEW_QUERY = `
-  query DesignerMetadataOverview($projectSlug: String, $runsLimit: Int) {
+  query DesignerMetadataOverview($projectSlug: String) {
     endpoints(projectSlug: $projectSlug) {
       id
       sourceId
@@ -16,15 +16,13 @@ export const METADATA_OVERVIEW_QUERY = `
       capabilities
       deletedAt
       deletionReason
-      runs(limit: 5) {
-        id
-        status
-        requestedAt
-        startedAt
-        completedAt
-        error
-      }
+      isDeleted
     }
+  }
+`;
+
+export const METADATA_COLLECTION_RUNS_QUERY = `
+  query DesignerMetadataCollectionRuns($runsLimit: Int) {
     metadataCollectionRuns(limit: $runsLimit) {
       id
       status
@@ -35,8 +33,14 @@ export const METADATA_OVERVIEW_QUERY = `
       endpoint {
         id
         name
+        isDeleted
       }
     }
+  }
+`;
+
+export const METADATA_ENDPOINT_TEMPLATES_QUERY = `
+  query DesignerMetadataEndpointTemplates {
     endpointTemplates {
       id
       family

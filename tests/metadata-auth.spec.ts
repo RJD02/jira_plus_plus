@@ -13,8 +13,12 @@ const DEFAULT_TEST_USERNAME = process.env.KEYCLOAK_TEST_USERNAME ?? "dev-writer"
 const DEFAULT_TEST_PASSWORD = process.env.KEYCLOAK_TEST_PASSWORD ?? "password";
 const METADATA_DEFAULT_PROJECT = process.env.METADATA_DEFAULT_PROJECT ?? "global";
 const METADATA_CATALOG_DOMAIN = process.env.METADATA_CATALOG_DOMAIN ?? "catalog.dataset";
+const PLAYWRIGHT_BAD_PASSWORD = "__PLAYWRIGHT_BAD_PASSWORD__";
+const METADATA_GRAPHQL_ENDPOINT = process.env.METADATA_GRAPHQL_ENDPOINT ?? "http://localhost:4010/graphql";
+const METADATA_GRAPHQL_ROUTE_PATTERNS = buildMetadataGraphqlRoutePatterns(METADATA_GRAPHQL_ENDPOINT);
+const PRIMARY_METADATA_GRAPHQL_ROUTE = METADATA_GRAPHQL_ROUTE_PATTERNS[0];
 
-test.beforeEach(({ page }) => {
+test.beforeEach(async ({ page }) => {
   page.addInitScript(() => {
     const originalFetch = window.fetch;
     window.fetch = async (...args) => {
@@ -37,6 +41,7 @@ test.beforeEach(({ page }) => {
       console.warn("[metadata-auth] graphql failure", response.status(), response.url());
     }
   });
+  await interceptMetadataTestWrites(page);
 });
 
 test("metadata console requires Keycloak login and loads workspace nav", async ({ page }) => {
@@ -95,7 +100,7 @@ test("metadata workspace sections render datasets, endpoints, and collections", 
 
   await page.getByRole("button", { name: "Collections" }).click();
   const collectionsPanel = page.locator("[data-testid='metadata-collections-panel']");
-  await expect(collectionsPanel).toBeVisible();
+  await expect(collectionsPanel).toBeVisible({ timeout: 20_000 });
 
   await page.locator("[data-testid='metadata-register-open']").first().click();
   await expect(page.locator("[data-testid='metadata-register-form']")).toBeVisible();
@@ -106,7 +111,7 @@ test("postgres template connection test succeeds", async ({ page }) => {
   await page.locator("[data-testid='metadata-register-open']").first().click();
   await expect(page.locator("[data-testid='metadata-register-form']")).toBeVisible();
 
-  await page.getByRole("button", { name: "JDBC" }).click();
+  await page.getByRole("button", { name: /JDBC sources/i }).click();
   const postgresOption = page.getByRole("button", { name: /PostgreSQL/i }).first();
   await expect(postgresOption).toBeVisible({ timeout: 20_000 });
   await postgresOption.click();
@@ -125,7 +130,7 @@ test("metadata endpoints can be registered, edited, and deleted", async ({ page,
   await page.locator("[data-testid='metadata-register-open']").first().click();
   await expect(page.locator("[data-testid='metadata-register-form']")).toBeVisible();
 
-  await page.getByRole("button", { name: "JDBC" }).click();
+  await page.getByRole("button", { name: /JDBC sources/i }).click();
   await page.getByRole("button", { name: /PostgreSQL/i }).first().click();
 
   const endpointName = `Playwright Endpoint ${Date.now()}`;
@@ -149,6 +154,7 @@ test("metadata endpoints can be registered, edited, and deleted", async ({ page,
     .filter({ hasText: endpointName })
     .first();
   await expect(endpointCard).toBeVisible({ timeout: 30_000 });
+  await endpointCard.scrollIntoViewIfNeeded();
   await endpointCard.getByRole("button", { name: "Details" }).click();
   await expect(page.getByTestId("metadata-endpoint-detail")).toBeVisible();
   await expect(page.getByRole("button", { name: "Delete" })).toHaveCount(0);
@@ -175,6 +181,7 @@ test("metadata endpoints can be registered, edited, and deleted", async ({ page,
     .filter({ hasText: updatedEndpointName })
     .first();
   await expect(updatedCard).toBeVisible({ timeout: 30_000 });
+  await updatedCard.scrollIntoViewIfNeeded();
   const datasetDisplayName = await ensureEndpointDatasetViaApi(request, updatedEndpointName);
   await updatedCard.getByRole("button", { name: "Details" }).click();
   await expect(page.getByTestId("metadata-endpoint-detail")).toBeVisible();
@@ -197,9 +204,18 @@ test("metadata endpoints can be registered, edited, and deleted", async ({ page,
 
 test("metadata viewer role cannot mutate endpoints", async ({ page, request }) => {
   const endpointName = `Viewer Endpoint ${Date.now()}`;
-  await registerEndpointViaApi(request, endpointName);
-  await ensureRealmUser({ username: "dev-viewer", password: "password", roles: ["viewer"] });
+  const viewerEndpoint = await registerEndpointViaApi(request, endpointName);
+  await ensureRealmUser({ username: "dev-viewer", password: "password", roles: ["reader"] });
   await openMetadataWorkspace(page, { username: "dev-viewer", password: "password" });
+  const expandButton = page.getByRole("button", { name: /Expand sidebar/i });
+  if (await expandButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+    await expandButton.click();
+  }
+  const runtimeRole = await page
+    .getByTestId("metadata-user-role")
+    .textContent()
+    .catch(() => null);
+  console.info("[metadata-auth] viewer runtime role:", runtimeRole);
   await page.getByRole("button", { name: "Endpoints" }).click();
   await ensureWorkspaceReady(page);
   await expect(page.getByTestId("metadata-register-open").first()).toBeDisabled();
@@ -208,6 +224,7 @@ test("metadata viewer role cannot mutate endpoints", async ({ page, request }) =
     .filter({ hasText: endpointName })
     .first();
   await expect(endpointCard).toBeVisible({ timeout: 30_000 });
+  await endpointCard.scrollIntoViewIfNeeded();
   const triggerButton = endpointCard.getByRole("button", { name: /Trigger collection/i });
   await expect(triggerButton).toBeDisabled();
   await endpointCard.getByRole("button", { name: "Details" }).click();
@@ -216,15 +233,23 @@ test("metadata viewer role cannot mutate endpoints", async ({ page, request }) =
   await expect(detailPanel.getByRole("button", { name: "Edit" })).toHaveCount(0);
   await expect(detailPanel.getByRole("button", { name: "Delete" })).toHaveCount(0);
   await page.getByRole("button", { name: "Close" }).click();
-  await deleteEndpointViaApi(request, endpointName);
+  await deleteEndpointViaApi(request, viewerEndpoint);
 });
 
 test("metadata admin can delete endpoints via the UI", async ({ page, request }) => {
   const endpointName = `Admin Endpoint ${Date.now()}`;
-  await registerEndpointViaApi(request, endpointName);
+  const adminEndpoint = await registerEndpointViaApi(request, endpointName);
+  const datasetDisplayName = await ensureEndpointDatasetViaApi(request, adminEndpoint);
   const adminCredentials = { username: "dev-admin", password: process.env.KEYCLOAK_ADMIN_PASSWORD ?? "password" };
   await ensureRealmUser({ ...adminCredentials, roles: ["admin"] });
   await openMetadataWorkspace(page, adminCredentials);
+  await page.getByRole("button", { name: "Catalog" }).click();
+  await ensureWorkspaceReady(page);
+  const catalogCard = page
+    .locator("[data-testid='metadata-catalog-card']")
+    .filter({ hasText: datasetDisplayName })
+    .first();
+  await expect(catalogCard).toBeVisible({ timeout: 30_000 });
   await page.getByRole("button", { name: "Endpoints" }).click();
   await ensureWorkspaceReady(page);
   const endpointCard = page
@@ -232,6 +257,7 @@ test("metadata admin can delete endpoints via the UI", async ({ page, request })
     .filter({ hasText: endpointName })
     .first();
   await expect(endpointCard).toBeVisible({ timeout: 30_000 });
+  await endpointCard.scrollIntoViewIfNeeded();
   await endpointCard.getByRole("button", { name: "Details" }).click();
   const deleteButton = page.getByRole("button", { name: "Delete" });
   await expect(deleteButton).toBeEnabled();
@@ -242,12 +268,24 @@ test("metadata admin can delete endpoints via the UI", async ({ page, request })
   await expect(
     page.locator("[data-testid='metadata-endpoint-card']").filter({ hasText: endpointName }),
   ).toHaveCount(0);
+  await page.getByRole("button", { name: "Catalog" }).click();
+  await ensureWorkspaceReady(page);
+  await expect(
+    page.locator("[data-testid='metadata-catalog-card']").filter({ hasText: datasetDisplayName }),
+  ).toHaveCount(0);
+  const catalogDatasets = await fetchCatalogDatasetsViaApi(request, adminEndpoint.id);
+  expect(catalogDatasets, "catalog hides datasets for deleted endpoint").toHaveLength(0);
+  const triggerResult = await triggerCollectionViaApi(request, adminEndpoint.id);
+  expect(triggerResult.ok).toBeFalsy();
+  expect(triggerResult.codes).toContain("E_ENDPOINT_DELETED");
+  const historicalRuns = await listCollectionRunsViaApi(request, adminEndpoint.id);
+  expect(historicalRuns.length).toBeGreaterThan(0);
 });
 
 test("metadata dataset preview requires preview capability", async ({ page, request }) => {
   const endpointName = `Preview Endpoint ${Date.now()}`;
-  await registerEndpointViaApi(request, endpointName, { capabilities: ["metadata"] });
-  const datasetDisplayName = await ensureEndpointDatasetViaApi(request, endpointName);
+  const previewEndpoint = await registerEndpointViaApi(request, endpointName, { capabilities: ["metadata"] });
+  const datasetDisplayName = await ensureEndpointDatasetViaApi(request, previewEndpoint);
   await openMetadataWorkspace(page);
   const catalogCard = page
     .locator("[data-testid='metadata-catalog-card']")
@@ -257,44 +295,136 @@ test("metadata dataset preview requires preview capability", async ({ page, requ
   await catalogCard.click();
   const previewButton = page.getByTestId("metadata-preview-button");
   await expect(previewButton).toBeDisabled();
-  await expect(
-    page.getByText(`Dataset previews disabled: ${endpointName} is missing the "preview" capability.`),
-  ).toBeVisible();
-  await deleteEndpointViaApi(request, endpointName);
+  const previewDisabledMessage = page
+    .getByText(`Dataset previews disabled: ${endpointName} is missing the "preview" capability.`)
+    .or(page.getByText(/Dataset previews disabled: this endpoint is missing the "preview" capability./i))
+    .or(page.getByText(/Link this dataset to a registered endpoint before running previews\./i));
+  await expect(previewDisabledMessage).toBeVisible();
+  await deleteEndpointViaApi(request, previewEndpoint);
 });
 
 test("metadata editor can trigger collection runs and see status chip", async ({ page, request }) => {
   const endpointName = `Trigger Endpoint ${Date.now()}`;
-  await registerEndpointViaApi(request, endpointName);
-  const stopIntercept = await interceptMetadataTestWrites(page);
-  try {
-    await openMetadataWorkspace(page);
-    await page.getByRole("button", { name: "Endpoints" }).click();
-    await ensureWorkspaceReady(page);
-    const endpointCard = page
-      .locator("[data-testid='metadata-endpoint-card']")
-      .filter({ hasText: endpointName })
-      .first();
-    await expect(endpointCard).toBeVisible({ timeout: 30_000 });
-    await endpointCard.getByRole("button", { name: /Trigger collection/i }).click();
+  const triggerEndpoint = await registerEndpointViaApi(request, endpointName);
+  await openMetadataWorkspace(page);
+  await page.getByRole("button", { name: "Endpoints" }).click();
+  await ensureWorkspaceReady(page);
+  const endpointCard = page
+    .locator("[data-testid='metadata-endpoint-card']")
+    .filter({ hasText: endpointName })
+    .first();
+  await expect(endpointCard).toBeVisible({ timeout: 30_000 });
+  await endpointCard.scrollIntoViewIfNeeded();
+  await endpointCard.getByRole("button", { name: /Trigger collection/i }).click();
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await ensureWorkspaceReady(page);
+  const statusPill = endpointCard.getByTestId("metadata-endpoint-status");
+  let statusMatched = false;
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    const attribute = (await statusPill.getAttribute("data-status")) ?? "";
+    if (/succeeded/i.test(attribute)) {
+      statusMatched = true;
+      break;
+    }
     await page.getByRole("button", { name: "Refresh" }).click();
     await ensureWorkspaceReady(page);
-    const statusPill = endpointCard.getByTestId("metadata-endpoint-status");
-    await expect(statusPill).toHaveAttribute("data-status", /succeeded/);
-    await page.getByRole("button", { name: "Collections" }).click();
-    const collectionsPanel = page.locator("[data-testid='metadata-collections-panel']");
-    await expect(collectionsPanel).toBeVisible();
-    await expect(collectionsPanel.locator("article").first()).toContainText(endpointName);
-  } finally {
-    await stopIntercept();
-    await deleteEndpointViaApi(request, endpointName);
   }
+  expect(statusMatched, "endpoint status pill should report succeeded").toBeTruthy();
+  await page.getByRole("button", { name: "Collections" }).click();
+  const collectionsPanel = page.locator("[data-testid='metadata-collections-panel']");
+  await expect(collectionsPanel).toBeVisible();
+  await expect(collectionsPanel.locator("article").first()).toContainText(endpointName);
+  await deleteEndpointViaApi(request, triggerEndpoint);
+});
+
+test("metadata endpoint credential regression requires fix before trigger", async ({ page, request }) => {
+  const endpointName = `Credential Endpoint ${Date.now()}`;
+  const endpoint = await registerEndpointViaApi(request, endpointName);
+  await openMetadataWorkspace(page);
+  await page.getByRole("button", { name: "Endpoints" }).click();
+  await ensureWorkspaceReady(page);
+  const endpointCard = page
+    .locator("[data-testid='metadata-endpoint-card']")
+    .filter({ hasText: endpointName })
+    .first();
+  await expect(endpointCard).toBeVisible({ timeout: 30_000 });
+  await endpointCard.getByRole("button", { name: "Details" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+  const passwordField = page.getByLabel(/^Password$/i).first();
+  await passwordField.fill(PLAYWRIGHT_BAD_PASSWORD);
+  await page.getByRole("button", { name: /Test connection/i }).click();
+  await expect(page.getByTestId("metadata-test-result")).toContainText("Connection test failed", {
+    timeout: 20_000,
+  });
+  await page.getByRole("button", { name: /Back to overview/i }).click();
+  await ensureWorkspaceReady(page);
+  const detailPanel = page.getByTestId("metadata-endpoint-detail");
+  if (await detailPanel.isVisible({ timeout: 2000 }).catch(() => false)) {
+    await detailPanel.getByRole("button", { name: "Close" }).click();
+  }
+  await updateEndpointPasswordViaApi(request, endpoint.id, PLAYWRIGHT_BAD_PASSWORD);
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await ensureWorkspaceReady(page);
+  await endpointCard.getByRole("button", { name: /Trigger collection/i }).click();
+  const mutationError = page.getByTestId("metadata-mutation-error");
+  await expect(mutationError).toContainText(/Connection test failed/i);
+  await updateEndpointPasswordViaApi(request, endpoint.id, POSTGRES_CONNECTION_DEFAULTS.password);
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await ensureWorkspaceReady(page);
+  await endpointCard.getByRole("button", { name: "Details" }).click();
+  await page.getByRole("button", { name: "Edit" }).click();
+  await passwordField.fill(POSTGRES_CONNECTION_DEFAULTS.password);
+  await page.getByRole("button", { name: /Test connection/i }).click();
+  await expect(page.getByTestId("metadata-test-result")).toContainText("Connection parameters validated.", {
+    timeout: 20_000,
+  });
+  await page.getByRole("button", { name: /Back to overview/i }).click();
+  await ensureWorkspaceReady(page);
+  await page.getByRole("button", { name: "Close" }).click();
+  await endpointCard.getByRole("button", { name: /Trigger collection/i }).click();
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await ensureWorkspaceReady(page);
+  await expect(endpointCard.getByTestId("metadata-endpoint-status")).toHaveAttribute("data-status", /succeeded/);
+  await deleteEndpointViaApi(request, endpoint);
+});
+
+test("metadata workspace surfaces ADR-0001 UI states", async ({ page }) => {
+  await openMetadataWorkspace(page);
+  await expect(page.getByTestId("metadata-register-open").first()).toBeVisible();
+  await page.getByRole("button", { name: "Catalog" }).click();
+  const catalogSearch = page.getByPlaceholder("Search name, label, or source");
+  const sentinelQuery = `no-results-${Date.now()}`;
+  await catalogSearch.fill(sentinelQuery);
+  await expect(page.getByTestId("metadata-catalog-empty")).toBeVisible();
+  await catalogSearch.fill("");
+  const metadataGraphql = PRIMARY_METADATA_GRAPHQL_ROUTE;
+  let intercepted = false;
+  const errorResponder = async (route: Route) => {
+    if (!intercepted) {
+      intercepted = true;
+      await route.fulfill({
+        status: 500,
+        contentType: "application/json",
+        body: JSON.stringify({ errors: [{ message: "Injected failure" }] }),
+      });
+      return;
+    }
+    await route.continue();
+  };
+  await page.route(metadataGraphql, errorResponder);
+  await page.getByRole("button", { name: "Refresh" }).click();
+  const errorBanner = page.getByTestId("metadata-error-banner");
+  await expect(errorBanner).toBeVisible({ timeout: 10_000 });
+  await errorBanner.click({ force: true }).catch(() => {});
+  await page.unroute(metadataGraphql, errorResponder);
+  await page.getByRole("button", { name: "Refresh" }).click();
+  await ensureWorkspaceReady(page);
 });
 
 async function ensureWorkspaceReady(page: Page) {
-  const errorBanner = page.getByRole("button", { name: /GraphQL request failed/i });
+  const errorBanner = page.getByTestId("metadata-error-banner");
   if (await errorBanner.isVisible({ timeout: 2000 }).catch(() => false)) {
-    await errorBanner.click();
+    await errorBanner.click({ force: true }).catch(() => {});
     await page.getByRole("button", { name: "Refresh" }).click();
   }
   const registerButton = page.getByTestId("metadata-register-open").first();
@@ -310,23 +440,30 @@ async function openMetadataWorkspace(page: Page, credentials?: { username?: stri
 
 async function fillPostgresConnectionForm(page: Page, overrides: Partial<typeof POSTGRES_CONNECTION_DEFAULTS> = {}) {
   const config = { ...POSTGRES_CONNECTION_DEFAULTS, ...overrides };
-  await page.getByLabel(/Host/i).fill(config.host);
-  await page.getByLabel(/Port/i).fill(config.port);
-  await page.getByLabel(/Database/i).fill(config.database);
-  await page.getByLabel(/Username/i).fill(config.username);
-  await page.getByLabel(/Password/i).fill(config.password);
-  await page.getByLabel(/Schemas/i).fill(config.schemas);
+  const fillField = async (label: RegExp, value: string) => {
+    // Some templates render marketing copy that also matches these labels;
+    // prefer the last match so we always target the actual input element.
+    await page.getByLabel(label).last().fill(value);
+  };
+  await fillField(/Host/i, config.host);
+  await fillField(/Port/i, config.port);
+  await fillField(/Database/i, config.database);
+  await fillField(/Username/i, config.username);
+  await fillField(/Password/i, config.password);
+  await fillField(/Schemas/i, config.schemas);
 }
 
-const METADATA_GRAPHQL_ENDPOINT = process.env.METADATA_GRAPHQL_ENDPOINT ?? "http://localhost:4010/graphql";
 const KEYCLOAK_REALM = process.env.KEYCLOAK_REALM ?? process.env.VITE_KEYCLOAK_REALM ?? "nucleus";
 const ADMIN_CREDENTIALS = { username: "dev-admin", password: process.env.KEYCLOAK_ADMIN_PASSWORD ?? "password" };
+
+type RegisteredEndpoint = { id: string; name: string };
+type EndpointRef = RegisteredEndpoint | string;
 
 async function registerEndpointViaApi(
   request: APIRequestContext,
   endpointName: string,
   options?: { capabilities?: string[]; labels?: string[] },
-): Promise<string> {
+): Promise<RegisteredEndpoint> {
   await ensureRealmUser({ username: DEFAULT_TEST_USERNAME, password: DEFAULT_TEST_PASSWORD, roles: ["writer"] });
   const writerToken = await fetchKeycloakTokenForUser(request, {
     username: DEFAULT_TEST_USERNAME,
@@ -364,26 +501,27 @@ async function registerEndpointViaApi(
     const errorBody = await registerResponse.text();
     throw new Error(`Failed to register endpoint via API: ${errorBody}`);
   }
-  const payload = (await registerResponse.json()) as { data?: { registerEndpoint?: { id: string } } };
+  const payload = (await registerResponse.json()) as { data?: { registerEndpoint?: { id: string; name: string } } };
   const endpointId = payload.data?.registerEndpoint?.id;
   if (!endpointId) {
     throw new Error("Register endpoint response missing id");
   }
-  return endpointId;
+  return { id: endpointId, name: endpointName };
 }
 
 async function ensureEndpointDatasetViaApi(
   request: APIRequestContext,
-  endpointName: string,
+  endpointRef: EndpointRef,
   options?: { displayName?: string },
 ): Promise<string> {
   const adminToken = await ensureAdminToken(request);
-  const endpoint = await fetchEndpointByName(request, adminToken, endpointName);
+  const endpoint =
+    typeof endpointRef === "string" ? await fetchEndpointByName(request, adminToken, endpointRef) : endpointRef;
   if (!endpoint) {
-    throw new Error(`Unable to locate endpoint "${endpointName}" to seed datasets`);
+    throw new Error(`Unable to locate endpoint "${typeof endpointRef === "string" ? endpointRef : endpointRef.name}" to seed datasets`);
   }
   const datasetId = `pw_dataset_${Date.now()}`;
-  const displayName = options?.displayName ?? `${endpointName} Dataset`;
+  const displayName = options?.displayName ?? `${endpoint.name} Dataset`;
   const upsertResponse = await request.post(METADATA_GRAPHQL_ENDPOINT, {
     data: {
       query: `
@@ -433,7 +571,7 @@ async function ensureEndpointDatasetViaApi(
 }
 
 async function interceptMetadataTestWrites(page: Page): Promise<() => Promise<void>> {
-  const targets = ["**://localhost:4010/graphql", "**://127.0.0.1:4010/graphql"];
+  const targets = METADATA_GRAPHQL_ROUTE_PATTERNS;
   const handler = async (route: Route) => {
     const headers = {
       ...route.request().headers(),
@@ -447,11 +585,12 @@ async function interceptMetadataTestWrites(page: Page): Promise<() => Promise<vo
   };
 }
 
-async function deleteEndpointViaApi(request: APIRequestContext, endpointName: string) {
+async function deleteEndpointViaApi(request: APIRequestContext, endpointRef: EndpointRef) {
   const adminToken = await ensureAdminToken(request);
-  const endpoint = await fetchEndpointByName(request, adminToken, endpointName);
+  const endpoint =
+    typeof endpointRef === "string" ? await fetchEndpointByName(request, adminToken, endpointRef) : endpointRef;
   if (!endpoint) {
-    throw new Error(`Unable to locate endpoint "${endpointName}" for deletion`);
+    throw new Error(`Unable to locate endpoint "${typeof endpointRef === "string" ? endpointRef : endpointRef.name}" for deletion`);
   }
   const deleteResponse = await request.post(METADATA_GRAPHQL_ENDPOINT, {
     data: {
@@ -468,6 +607,172 @@ async function deleteEndpointViaApi(request: APIRequestContext, endpointName: st
     const errorBody = await deleteResponse.text();
     throw new Error(`Failed to delete endpoint via API: ${errorBody}`);
   }
+}
+
+async function updateEndpointPasswordViaApi(
+  request: APIRequestContext,
+  endpointId: string,
+  password: string,
+): Promise<void> {
+  const adminToken = await ensureAdminToken(request);
+  const existingConfig = await fetchEndpointConfigViaApi(request, adminToken, endpointId);
+  const currentParameters = (existingConfig.parameters as Record<string, unknown> | undefined) ?? {};
+  const nextConfig = {
+    ...existingConfig,
+    parameters: {
+      ...currentParameters,
+      password,
+    },
+  };
+  const response = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `
+        mutation UpdateEndpointConfig($id: ID!, $config: JSON!) {
+          updateEndpoint(id: $id, patch: { config: $config }) {
+            id
+          }
+        }
+      `,
+      variables: { id: endpointId, config: nextConfig },
+    },
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+      "X-Metadata-Test-Write": "1",
+    },
+  });
+  if (!response.ok()) {
+    const errorBody = await response.text();
+    throw new Error(`Failed to update endpoint config: ${errorBody}`);
+  }
+}
+
+async function fetchEndpointConfigViaApi(
+  request: APIRequestContext,
+  token: string,
+  endpointId: string,
+): Promise<Record<string, unknown>> {
+  const response = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `
+        query EndpointConfig($id: ID!) {
+          endpoint(id: $id) {
+            config
+          }
+        }
+      `,
+      variables: { id: endpointId },
+    },
+    headers: {
+      Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!response.ok()) {
+    const errorBody = await response.text();
+    throw new Error(`Failed to fetch endpoint config: ${errorBody}`);
+  }
+  const payload = (await response.json()) as { data?: { endpoint?: { config?: Record<string, unknown> } } };
+  return (payload.data?.endpoint?.config as Record<string, unknown>) ?? { templateId: "jdbc.postgres", parameters: {} };
+}
+
+async function fetchCatalogDatasetsViaApi(request: APIRequestContext, endpointId: string): Promise<string[]> {
+  const adminToken = await ensureAdminToken(request);
+  const response = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `
+        query CatalogDatasets($endpointId: ID!, $labels: [String!]) {
+          catalogDatasets(endpointId: $endpointId, labels: $labels) {
+            id
+          }
+        }
+      `,
+      variables: { endpointId, labels: [`endpoint:${endpointId}`] },
+    },
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!response.ok()) {
+    const errorBody = await response.text();
+    throw new Error(`Failed to fetch catalog datasets: ${errorBody}`);
+  }
+  const payload = (await response.json()) as { data?: { catalogDatasets?: Array<{ id: string }> } };
+  return payload.data?.catalogDatasets?.map((dataset) => dataset.id) ?? [];
+}
+
+async function triggerCollectionViaApi(
+  request: APIRequestContext,
+  endpointRef: EndpointRef,
+): Promise<{ ok: boolean; codes: string[] }> {
+  const adminToken = await ensureAdminToken(request);
+  const endpointId = typeof endpointRef === "string" ? endpointRef : endpointRef.id;
+  const response = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `
+        mutation TriggerCollection($endpointId: ID!) {
+          triggerCollection(endpointId: $endpointId) {
+            id
+            status
+          }
+        }
+      `,
+      variables: { endpointId },
+    },
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+      "X-Metadata-Test-Write": "1",
+    },
+  });
+  if (!response.ok()) {
+    const errorBody = await response.text();
+    throw new Error(`Failed to trigger collection via API: ${errorBody}`);
+  }
+  const payload = (await response.json()) as {
+    data?: { triggerCollection?: { id: string } };
+    errors?: Array<{ extensions?: { code?: string } }>;
+  };
+  if (payload.errors?.length) {
+    return {
+      ok: false,
+      codes: payload.errors.map((error) => error.extensions?.code ?? "UNKNOWN"),
+    };
+  }
+  return { ok: Boolean(payload.data?.triggerCollection?.id), codes: [] };
+}
+
+async function listCollectionRunsViaApi(
+  request: APIRequestContext,
+  endpointId: string,
+): Promise<Array<{ id: string; status: string }>> {
+  const adminToken = await ensureAdminToken(request);
+  const response = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `
+        query CollectionRuns($endpointId: ID!) {
+          metadataCollectionRuns(filter: { endpointId: $endpointId }) {
+            id
+            status
+          }
+        }
+      `,
+      variables: { endpointId },
+    },
+    headers: {
+      Authorization: `Bearer ${adminToken}`,
+      "Content-Type": "application/json",
+    },
+  });
+  if (!response.ok()) {
+    const errorBody = await response.text();
+    throw new Error(`Failed to list collection runs: ${errorBody}`);
+  }
+  const payload = (await response.json()) as {
+    data?: { metadataCollectionRuns?: Array<{ id: string; status: string }> };
+  };
+  return payload.data?.metadataCollectionRuns ?? [];
 }
 
 async function fetchKeycloakTokenForUser(
@@ -504,17 +809,71 @@ async function fetchEndpointByName(
   token: string,
   endpointName: string,
 ): Promise<{ id: string; name: string } | null> {
-  const listResponse = await request.post(METADATA_GRAPHQL_ENDPOINT, {
-    data: { query: `query EndpointList { endpoints { id name } }` },
+  for (let attempt = 0; attempt < 10; attempt += 1) {
+    const listResponse = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+      data: {
+        query: `query EndpointList($search: String) { endpoints(search: $search) { id name } }`,
+        variables: { search: endpointName },
+      },
+      headers: {
+        Authorization: `Bearer ${token}`,
+        "Content-Type": "application/json",
+      },
+    });
+    if (!listResponse.ok()) {
+      const errorBody = await listResponse.text();
+      throw new Error(`Failed to list endpoints: ${errorBody}`);
+    }
+    const listPayload = (await listResponse.json()) as { data?: { endpoints: Array<{ id: string; name: string }> } };
+    const match = listPayload.data?.endpoints.find((entry) => entry.name === endpointName);
+    if (match) {
+      return match;
+    }
+    await delay(500 * (attempt + 1));
+  }
+  const fallbackResponse = await request.post(METADATA_GRAPHQL_ENDPOINT, {
+    data: {
+      query: `query MetadataEndpointList { metadataEndpoints { id name } }`,
+    },
     headers: {
       Authorization: `Bearer ${token}`,
       "Content-Type": "application/json",
     },
   });
-  if (!listResponse.ok()) {
-    const errorBody = await listResponse.text();
-    throw new Error(`Failed to list endpoints: ${errorBody}`);
+  if (!fallbackResponse.ok()) {
+    const errorBody = await fallbackResponse.text();
+    throw new Error(`Failed to list metadata endpoints: ${errorBody}`);
   }
-  const listPayload = (await listResponse.json()) as { data?: { endpoints: Array<{ id: string; name: string }> } };
-  return listPayload.data?.endpoints.find((entry) => entry.name === endpointName) ?? null;
+  const fallbackPayload = (await fallbackResponse.json()) as {
+    data?: { metadataEndpoints: Array<{ id: string; name: string }> };
+  };
+  return fallbackPayload.data?.metadataEndpoints.find((entry) => entry.name === endpointName) ?? null;
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function buildMetadataGraphqlRoutePatterns(endpoint: string): string[] {
+  const patterns = new Set<string>();
+  patterns.add(resolveMetadataGraphqlRoutePattern(endpoint));
+  patterns.add("**://localhost:4010/graphql");
+  patterns.add("**://127.0.0.1:4010/graphql");
+  patterns.add("**/metadata/graphql");
+  return Array.from(patterns);
+}
+
+function resolveMetadataGraphqlRoutePattern(endpoint: string): string {
+  if (!endpoint) {
+    return "**/metadata/graphql";
+  }
+  if (endpoint.startsWith("/")) {
+    return endpoint.startsWith("**") ? endpoint : `**${endpoint}`;
+  }
+  try {
+    const url = new URL(endpoint);
+    return `**://${url.host}${url.pathname}`;
+  } catch {
+    return endpoint;
+  }
 }

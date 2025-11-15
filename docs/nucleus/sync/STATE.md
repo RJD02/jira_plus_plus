@@ -1,16 +1,16 @@
 # STATE SYNC (auto-updated)
 
 ## Focus Feature
-endpoint-lifecycle (in-progress @ 2025-11-13T15:44Z)
+endpoint-lifecycle (success @ 2025-11-15T08:23Z)
 
 ## Last Run
 - slug: endpoint-lifecycle
-- status: in-progress (UI edit/delete wiring + Playwright lifecycle coverage landed; closing out remaining ACCEPTANCE items)
-- duration: ~4h prior + current session active
-- tests: `make ci-check` (passes; includes metadata-lifecycle + metadata-auth) and standalone `corepack pnpm check:metadata-auth` (expanded lifecycle suite, green).
+- status: success (AC1–AC6 evidenced, metadata-auth + metadata-lifecycle suites green as of 2025-11-15T08:23Z)
+- duration: ~5h total (current session)
+- tests: `corepack pnpm check:metadata-auth` ✅, `make ci-check` ✅
 - commits: (n/a)
-- decisions: 2
-- next_step: Re-parse ACCEPTANCE to verify dataset tab/docs coverage, wrap TODO/QUESTIONS, and prep final handoff artifacts.
+- decisions: +2 this session
+- next_step: n/a — feature accepted.
 
 ## Global Queue
 TODAY:
@@ -21,4 +21,5 @@ LATER:
 - 
 
 ## Events (last 24h)
-- (none)
+- 2025-11-14T08:48Z run success (endpoint-lifecycle, AC1–AC6 verified; metadata-auth + make ci-check green)
+- 2025-11-14T13:45Z run blocked (endpoint-lifecycle, designer dev server stuck on stale bundle)

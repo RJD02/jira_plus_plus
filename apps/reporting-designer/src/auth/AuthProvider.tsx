@@ -1,6 +1,6 @@
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import type { KeycloakInstance, KeycloakTokenParsed } from "keycloak-js";
+import type { KeycloakInstance, KeycloakProfile, KeycloakTokenParsed } from "keycloak-js";
 import {
   kc,
   MAX_AUTO_ATTEMPTS,
@@ -20,6 +20,7 @@ export type AuthErrorState = StoredAuthError;
 
 export interface AuthUser {
   id: string;
+  username: string;
   email: string;
   displayName: string;
   role: Role;
@@ -52,6 +53,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const lastLoggedError = useRef<number | null>(null);
   const autoSuppressedReason = useRef<string | null>(null);
   const initLogged = useRef(false);
+  const hydratedProfiles = useRef<Set<string>>(new Set());
 
   const syncAutoAttempts = useCallback(() => {
     setAutoAttempts(typeof window === "undefined" ? 0 : getAutoAttempts());
@@ -95,6 +97,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       }
       setToken(instance.token);
       setUser(mapped);
+      if (typeof window !== "undefined") {
+        (window as typeof window & { __metadataAuthRole?: Role }).__metadataAuthRole = mapped.role;
+      }
+      if (typeof document !== "undefined") {
+        document.body.dataset.metadataAuthRole = mapped.role;
+      }
+      logAuthEvent("auth:role", { role: mapped.role });
       setPhase("authenticated");
       setAuthError(null);
       setLastAuthError(null);
@@ -241,6 +250,54 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [authError, phase, syncAutoAttempts]);
 
+  useEffect(() => {
+    if (!kc || typeof kc.loadUserProfile !== "function") {
+      return;
+    }
+    if (!user?.id) {
+      hydratedProfiles.current.clear();
+      return;
+    }
+    if (hydratedProfiles.current.has(user.id)) {
+      return;
+    }
+    hydratedProfiles.current.add(user.id);
+    let cancelled = false;
+    kc.loadUserProfile()
+      .then((profile) => {
+        if (cancelled || !profile) {
+          return;
+        }
+        setUser((current) => {
+          if (!current || current.id !== user.id) {
+            return current;
+          }
+          const enriched = mergeProfileFields(profile, current);
+          if (
+            enriched.displayName === current.displayName &&
+            enriched.email === current.email &&
+            enriched.username === current.username
+          ) {
+            return current;
+          }
+          return enriched;
+        });
+      })
+      .catch((error) => {
+        hydratedProfiles.current.delete(user.id);
+        logAuthEvent(
+          "auth:profile_failed",
+          {
+            message: error instanceof Error ? error.message : String(error),
+          },
+          "error",
+        );
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [user?.id]);
+
   const login = useCallback(() => {
     if (!kc || typeof window === "undefined") {
       logAuthEvent("auth:auto_suppressed", { reason: "missing_keycloak" });
@@ -341,14 +398,19 @@ function mapTokenToUser(parsed?: KeycloakTokenParsed): AuthUser | null {
     return null;
   }
   const id = stringClaim(parsed.sub) ?? "anonymous";
-  const email = stringClaim(parsed.email) ?? `${stringClaim(parsed.preferred_username) ?? id}@example.com`;
-  const displayName = stringClaim(parsed.name) ?? stringClaim(parsed.preferred_username) ?? email ?? id;
+  const username =
+    stringClaim(parsed.preferred_username) ??
+    stringClaim((parsed as Record<string, unknown>)["preferred-username"]) ??
+    id;
+  const email = stringClaim(parsed.email) ?? `${username}@example.com`;
+  const displayName = stringClaim(parsed.name) ?? username ?? email ?? id;
   const tenantId = stringClaim((parsed as Record<string, unknown>)["tenant_id"]);
   const projectId = stringClaim((parsed as Record<string, unknown>)["project_id"]);
   return {
     id,
     email,
     displayName,
+    username,
     role: deriveRole(parsed),
     tenantId,
     projectId,
@@ -357,6 +419,31 @@ function mapTokenToUser(parsed?: KeycloakTokenParsed): AuthUser | null {
 
 function stringClaim(value: unknown): string | null {
   return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function mergeProfileFields(profile: KeycloakProfile, fallback: AuthUser): AuthUser {
+  const profileDisplayName = buildProfileDisplayName(profile);
+  const profileEmail = stringClaim(profile.email);
+  const profileUsername = stringClaim(profile.username);
+  return {
+    ...fallback,
+    displayName: profileDisplayName ?? fallback.displayName,
+    email: profileEmail ?? fallback.email,
+    username: profileUsername ?? fallback.username,
+  };
+}
+
+function buildProfileDisplayName(profile?: KeycloakProfile | null): string | null {
+  if (!profile) {
+    return null;
+  }
+  const firstName = stringClaim(profile.firstName);
+  const lastName = stringClaim(profile.lastName);
+  const combined = [firstName, lastName].filter(Boolean).join(" ").trim();
+  if (combined.length > 0) {
+    return combined;
+  }
+  return stringClaim(profile.username) ?? stringClaim(profile.email) ?? null;
 }
 
 function deriveRole(parsed: KeycloakTokenParsed): Role {
@@ -377,14 +464,22 @@ function deriveRole(parsed: KeycloakTokenParsed): Role {
       }
     });
   }
-  const scope = typeof parsed.scope === "string" ? parsed.scope : null;
-  if (scope && scope.split(" ").map((entry) => entry.trim()).includes("nucleus-context")) {
-    collected.add("writer");
+  if (import.meta.env.DEV && typeof window !== "undefined") {
+    (window as typeof window & { __metadataRawRoles?: string[]; __metadataAuthDebug?: unknown }).__metadataRawRoles =
+      Array.from(collected);
+    (window as typeof window & { __metadataAuthDebug?: unknown }).__metadataAuthDebug = {
+      collected: Array.from(collected),
+      scope: typeof parsed.scope === "string" ? parsed.scope : null,
+      direct: Array.isArray(parsed.roles) ? parsed.roles : null,
+      realm: (parsed.realm_access as { roles?: unknown } | undefined)?.roles ?? null,
+      resource: parsed.resource_access ?? null,
+    };
   }
   if (collected.has("admin")) {
     return "ADMIN";
   }
-  if (collected.has("manager") || collected.has("writer") || collected.has("editor")) {
+  const hasWriterLike = collected.has("manager") || collected.has("writer") || collected.has("editor");
+  if (hasWriterLike && !collected.has("reader")) {
     return "MANAGER";
   }
   return "USER";

@@ -1,47 +1,79 @@
-# Acceptance Criteria — Endpoint Lifecycle (API + UI)
+# Acceptance Criteria
 
-1) Create requires passing “Test” (API + UI)
-   - Type: integration + e2e
-   - API: testEndpoint returns { ok: true } before register (GraphQL).
-   - UI: After a passing test, the “Register” button is enabled; clicking it registers and navigates back to list without a full reload. New endpoint appears immediately in the list.
+### Shared Setup (AC1–AC5)
 
-2) Edit requires re-test when connection fields change (API + UI)
-   - Type: integration + e2e
-   - API: updateEndpoint fails with E_CONN_TEST_REQUIRED if url/verb/authPolicy/config changed and no fresh test exists; succeeds after a passing test; updatedAt changes.
-   - UI: When connection fields change, “Save” is disabled until a passing test is performed; tooltip or banner explains why.
+Use JDBC Postgres template with:
 
-3) Delete is guarded while a run is active (API + UI)
-   - Type: integration + e2e
-   - API: deleteEndpoint returns GraphQL error E_ENDPOINT_IN_USE when a RUNNING MetadataCollectionRun exists.
-   - UI: Delete action is disabled or shows a banner while active run is present; once no active runs, delete succeeds and the row disappears from the list.
+```json
+{
+  "parameters": {
+    "host": "localhost",
+    "port": "5432",
+    "database": "jira_plus_plus",
+    "username": "postgres",
+    "password": "postgres",
+    "role": "",
+    "schemas": "",
+    "ssl_mode": "",
+    "version_hint": "",
+    "ssl_root_cert": "",
+    "ssl_client_key": "",
+    "ssl_client_cert": "",
+    "application_name": "",
+    "connect_timeout_ms": "",
+    "statement_timeout_ms": "",
+    "additional_parameters": ""
+  },
+  "templateId": "jdbc.postgres"
+}
+```
 
-4) Role matrix enforced and reflected in controls (UI visibility)
-   - Type: e2e + API
-   - viewer: mutations rejected with E_ROLE_FORBIDDEN; create/edit/delete/trigger controls hidden or disabled.
-   - editor: can register/update/trigger; delete is rejected/hidden.
-   - admin: full access.
+---
 
-5) Capability-aware behavior (server and UI)
-   - Type: e2e + API
-   - With missing “preview” capability, preview/trigger UI controls are disabled; misuse returns E_CAPABILITY_MISSING.
+### **1) Create → auto collection → datasets**
 
-6) Trigger shows run chips and progresses to terminal state (UI)
-   - Type: e2e
-   - triggerCollection returns a MetadataCollectionRun (status QUEUED); cards/detail page show live status until terminal; final status chip is visible.
+* Type: integration + e2e
+* Evidence: `registerEndpoint` creates endpoint & immediately triggers a collection run. Run reaches `SUCCEEDED`. Catalog displays new tables/datasets.
 
-7) Detail page lists datasets for this endpoint (UI)
-   - Type: e2e + API
-   - Records labeled endpoint:<endpointId> are returned by endpointDatasets and rendered in the “Datasets” tab; optional domain filter works.
+### **2) Manual Trigger Collection**
 
-8) Secrets masked everywhere (API + UI)
-   - Type: integration + e2e
-   - URLs or credentials are never shown in clear text in API responses, logs, or UI; masked form is rendered.
+* Type: integration + e2e
+* Evidence: From UI, “Trigger collection” calls mutation → new run appears → run finishes → detail + catalog reflect updated metadata.
 
-9) Performance guard (API + UI)
-   - Type: perf smoke
-   - API: endpoints(first:50) p95 ≤ 300 ms with ~100 endpoints (local).
-   - UI: initial render of the endpoints list completes with no console errors; UI perf probe stays under agreed budget.
+### **3) Wrong credentials → test/trigger fail**
 
-10) Contract guard (CI)
-   - Type: CI job
-   - A contract diff step compares /openapi.json (or GraphQL schema) with a stored baseline and fails on breaking changes (renames/removals).
+* Type: integration + e2e
+* Evidence:
+
+  * Update endpoint: change password to a wrong value.
+  * `testEndpoint` returns `ok=false` + `E_CONN_TEST_FAILED`.
+  * Manual trigger fails: either `E_CONN_INVALID` or Temporal run `FAILED`.
+  * UI shows error banner (no infinite loading).
+
+### **4) Correct credentials → test/trigger succeed**
+
+* Type: integration + e2e
+* Evidence: restore password, run `testEndpoint` → `ok=true`; manual trigger succeeds → run appears and finishes successfully.
+
+### **5) Soft delete semantics**
+
+* Type: integration + e2e
+* Evidence:
+
+  * `deleteEndpoint` sets `deletedAt`
+  * Endpoint removed from list
+  * Manual trigger blocked with `E_ENDPOINT_DELETED`
+  * Catalog no longer shows datasets for this endpoint
+  * Historical runs remain accessible
+
+### **6) UI State Contract (ADR-0001)**
+
+* Type: e2e
+* Evidence:
+
+  * Loading indicator removed ≤ 1s after GraphQL settles
+  * Empty state shown when no endpoints (no spinner)
+  * GraphQL errors → banner with code (no spinner)
+  * `E_AUTH_REQUIRED` → Sign-in CTA
+  * `E_ROLE_FORBIDDEN` → Insufficient permissions
+  * Retry/refresh always resolves to one of: data / empty / error / auth (never infinite loading)

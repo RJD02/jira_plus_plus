@@ -43,7 +43,7 @@ export type MetadataCollectionRunSummary = {
   startedAt?: string | null;
   completedAt?: string | null;
   error?: string | null;
-  endpoint?: { id: string; name: string } | null;
+  endpoint?: { id: string; name: string; isDeleted?: boolean | null } | null;
 };
 
 export type MetadataEndpointSummary = {
@@ -62,7 +62,8 @@ export type MetadataEndpointSummary = {
   capabilities?: string[] | null;
   deletedAt?: string | null;
   deletionReason?: string | null;
-  runs: MetadataCollectionRunSummary[];
+  isDeleted: boolean;
+  runs?: MetadataCollectionRunSummary[] | null;
 };
 
 export type MetadataEndpointTemplateOption = {

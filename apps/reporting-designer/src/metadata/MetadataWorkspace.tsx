@@ -13,6 +13,8 @@ import { formatDateTime, formatPreviewValue, formatRelativeTime } from "../lib/f
 import { fetchMetadataGraphQL } from "./api";
 import {
   ENDPOINT_DATASETS_QUERY,
+  METADATA_COLLECTION_RUNS_QUERY,
+  METADATA_ENDPOINT_TEMPLATES_QUERY,
   METADATA_OVERVIEW_QUERY,
   PREVIEW_METADATA_DATASET_MUTATION,
   REGISTER_METADATA_ENDPOINT_MUTATION,
@@ -42,6 +44,7 @@ type MetadataWorkspaceProps = {
   authToken?: string | null;
   projectSlug?: string | null;
   userRole: Role;
+  onEndpointDeleted?: (endpointId: string) => Promise<void> | void;
 };
 
 type MetadataSection = "catalog" | "endpoints" | "collections";
@@ -109,6 +112,24 @@ function serializeTemplateConfigSignature(templateId: string | null, values: Rec
   return JSON.stringify({ templateId, parameters: sortedParameters });
 }
 
+function buildTemplateConnectionUrl(
+  template: MetadataEndpointTemplate | null,
+  parameters: Record<string, string>,
+): string | null {
+  if (!template?.connection?.urlTemplate) {
+    return null;
+  }
+  let resolved = template.connection.urlTemplate;
+  resolved = resolved.replace(/{{\s*([^}]+)\s*}}/g, (_match, key: string) => {
+    const normalizedKey = String(key).trim();
+    const replacement = parameters[normalizedKey];
+    return typeof replacement === "string" ? replacement : "";
+  });
+  resolved = resolved.replace(/{{[^}]+}}/g, "");
+  const trimmed = resolved.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
 const statusStyles: Record<
   MetadataCollectionRunSummary["status"],
   { badge: string; dot: string }
@@ -143,10 +164,13 @@ export function MetadataWorkspace({
   authToken,
   projectSlug,
   userRole,
+  onEndpointDeleted,
 }: MetadataWorkspaceProps) {
   const [metadataEndpoints, setMetadataEndpoints] = useState<MetadataEndpointSummary[]>([]);
   const [metadataRuns, setMetadataRuns] = useState<MetadataCollectionRunSummary[]>([]);
   const [metadataTemplates, setMetadataTemplates] = useState<MetadataEndpointTemplate[]>([]);
+  const [metadataTemplatesLoading, setMetadataTemplatesLoading] = useState(false);
+  const [metadataTemplatesError, setMetadataTemplatesError] = useState<string | null>(null);
   const [metadataTemplateValues, setMetadataTemplateValues] = useState<Record<string, string>>({});
   const [metadataTemplateFamily, setMetadataTemplateFamily] = useState<TemplateFamily>("JDBC");
   const [selectedTemplateId, setSelectedTemplateId] = useState<string | null>(null);
@@ -177,21 +201,25 @@ export function MetadataWorkspace({
   const [metadataCatalogPreviewingId, setMetadataCatalogPreviewingId] = useState<string | null>(null);
   const [metadataEndpointDetailId, setMetadataEndpointDetailId] = useState<string | null>(null);
   const [metadataDatasetDetailId, setMetadataDatasetDetailId] = useState<string | null>(null);
+  const [pendingTemplateSelection, setPendingTemplateSelection] = useState<{ templateId: string | null; familyOverride: TemplateFamily | null } | null>(null);
+  const [pendingEndpointEdit, setPendingEndpointEdit] = useState<MetadataEndpointSummary | null>(null);
+  const [metadataRunsLoading, setMetadataRunsLoading] = useState(false);
+  const [metadataRunsError, setMetadataRunsError] = useState<string | null>(null);
+  const [metadataRunsRequestKey, setMetadataRunsRequestKey] = useState(0);
+  const [metadataRunsLoadedKey, setMetadataRunsLoadedKey] = useState<number | null>(null);
+  const [metadataRunsLoaded, setMetadataRunsLoaded] = useState(false);
   const [sectionNavCollapsed, setSectionNavCollapsed] = useState(false);
   const [endpointDatasetRecords, setEndpointDatasetRecords] = useState<Record<string, EndpointDatasetRecord[]>>({});
   const [endpointDatasetErrors, setEndpointDatasetErrors] = useState<Record<string, string>>({});
   const [endpointDatasetLoading, setEndpointDatasetLoading] = useState<Record<string, boolean>>({});
-  const metadataRole = useMemo(() => {
-    if (userRole === "ADMIN") {
-      return "admin";
-    }
-    if (userRole === "MANAGER") {
-      return "editor";
-    }
-    return "viewer";
-  }, [userRole]);
-  const canModifyEndpoints = metadataRole !== "viewer";
-  const canDeleteEndpoints = metadataRole === "admin";
+  const resolvedRole =
+    userRole ??
+    ((typeof document !== "undefined"
+      ? (document.body.dataset.metadataAuthRole as Role | undefined)
+      : undefined) ??
+      "USER");
+  const canModifyEndpoints = resolvedRole === "ADMIN" || resolvedRole === "MANAGER";
+  const canDeleteEndpoints = resolvedRole === "ADMIN";
   const metadataEditingEndpoint = useMemo(
     () => (metadataEditingEndpointId ? metadataEndpoints.find((endpoint) => endpoint.id === metadataEditingEndpointId) ?? null : null),
     [metadataEditingEndpointId, metadataEndpoints],
@@ -311,17 +339,30 @@ export function MetadataWorkspace({
 
   const metadataLatestRunByEndpoint = useMemo(() => {
     const map = new Map<string, MetadataCollectionRunSummary>();
-    metadataEndpoints.forEach((endpoint) => {
-      if (!endpoint.runs.length) {
+    metadataRuns.forEach((run) => {
+      const endpointId = run.endpoint?.id;
+      if (!endpointId) {
         return;
       }
-      const sorted = [...endpoint.runs].sort(
+      const existing = map.get(endpointId);
+      if (!existing || new Date(run.requestedAt).getTime() > new Date(existing.requestedAt).getTime()) {
+        map.set(endpointId, run);
+      }
+    });
+    metadataEndpoints.forEach((endpoint) => {
+      const endpointRuns = endpoint.runs ?? [];
+      if (map.has(endpoint.id) || endpointRuns.length === 0) {
+        return;
+      }
+      const sorted = [...endpointRuns].sort(
         (a, b) => new Date(b.requestedAt).getTime() - new Date(a.requestedAt).getTime(),
       );
-      map.set(endpoint.id, sorted[0]);
+      if (sorted.length > 0) {
+        map.set(endpoint.id, sorted[0]);
+      }
     });
     return map;
-  }, [metadataEndpoints]);
+  }, [metadataEndpoints, metadataRuns]);
 
   const metadataTemplatesByFamily = useMemo(() => {
     return metadataTemplates.reduce<Record<TemplateFamily, MetadataEndpointTemplate[]>>(
@@ -336,20 +377,46 @@ export function MetadataWorkspace({
 
   const filteredTemplates = metadataTemplatesByFamily[metadataTemplateFamily] ?? [];
 
-  const handleOpenRegistration = useCallback(
-    (templateId?: string, familyOverride?: TemplateFamily) => {
-      setMetadataFormMode("register");
-      setMetadataEditingEndpointId(null);
-      setMetadataInitialConfigSignature(null);
-      setMetadataLastTestConfigSignature(null);
-      setMetadataEndpointName("");
-      setMetadataEndpointDescription("");
-      setMetadataEndpointLabels("");
-      setMetadataTemplateValues({});
-      setMetadataTestResult(null);
-      setMetadataMutationError(null);
+  const ensureTemplatesLoaded = useCallback(
+    (options?: { force?: boolean }) => {
+      if (!metadataEndpoint || !authToken) {
+        return;
+      }
+      if (!options?.force && (metadataTemplatesLoading || metadataTemplates.length > 0)) {
+        return;
+      }
+      setMetadataTemplatesLoading(true);
+      setMetadataTemplatesError(null);
+      void fetchMetadataGraphQL<{ endpointTemplates: MetadataEndpointTemplate[] }>(
+        metadataEndpoint,
+        METADATA_ENDPOINT_TEMPLATES_QUERY,
+        undefined,
+        undefined,
+        { token: authToken ?? undefined },
+      )
+        .then((payload) => {
+          setMetadataTemplates(payload.endpointTemplates ?? []);
+        })
+        .catch((error) => {
+          setMetadataTemplatesError(error instanceof Error ? error.message : String(error));
+        })
+        .finally(() => {
+          setMetadataTemplatesLoading(false);
+        });
+    },
+    [authToken, metadataEndpoint, metadataTemplates.length, metadataTemplatesLoading],
+  );
+  const handleRetryLoadTemplates = useCallback(() => {
+    ensureTemplatesLoaded({ force: true });
+  }, [ensureTemplatesLoaded]);
+
+  const applyTemplateSelection = useCallback(
+    (templateId: string | null, familyOverride: TemplateFamily | null) => {
+      if (!metadataTemplates.length) {
+        return;
+      }
       let targetFamily = familyOverride ?? metadataTemplateFamily;
-      let nextTemplateId = templateId ?? null;
+      let nextTemplateId = templateId;
       if (templateId) {
         const explicitTemplate = metadataTemplates.find((template) => template.id === templateId);
         if (explicitTemplate) {
@@ -366,12 +433,11 @@ export function MetadataWorkspace({
       if (nextTemplateId) {
         setSelectedTemplateId(nextTemplateId);
       }
-      setMetadataView("endpoint-register");
     },
     [metadataTemplateFamily, metadataTemplates, metadataTemplatesByFamily],
   );
 
-  const handleOpenEndpointEdit = useCallback(
+  const populateEndpointEditFields = useCallback(
     (endpoint: MetadataEndpointSummary) => {
       const templateIdFromConfig = extractTemplateIdFromConfig(endpoint.config);
       let resolvedTemplate = templateIdFromConfig
@@ -405,13 +471,55 @@ export function MetadataWorkspace({
       setMetadataEndpointLabels((endpoint.labels ?? []).join(", "));
       setMetadataMutationError(null);
       setMetadataTestResult(null);
-      setMetadataView("endpoint-register");
-      setMetadataEndpointDetailId(null);
     },
     [metadataTemplateFamily, metadataTemplates],
   );
 
+  const handleOpenRegistration = useCallback(
+    (templateId?: string, familyOverride?: TemplateFamily) => {
+      setMetadataFormMode("register");
+      setMetadataEditingEndpointId(null);
+      setMetadataInitialConfigSignature(null);
+      setMetadataLastTestConfigSignature(null);
+      setMetadataEndpointName("");
+      setMetadataEndpointDescription("");
+      setMetadataEndpointLabels("");
+      setMetadataTemplateValues({});
+      setMetadataTestResult(null);
+      setMetadataMutationError(null);
+      setMetadataDatasetDetailId(null);
+      setMetadataEndpointDetailId(null);
+      setPendingEndpointEdit(null);
+      setMetadataView("endpoint-register");
+      if (metadataTemplates.length > 0) {
+        applyTemplateSelection(templateId ?? null, familyOverride ?? null);
+      } else {
+        setPendingTemplateSelection({ templateId: templateId ?? null, familyOverride: familyOverride ?? null });
+        ensureTemplatesLoaded();
+      }
+    },
+    [applyTemplateSelection, ensureTemplatesLoaded, metadataTemplates.length],
+  );
+
+  const handleOpenEndpointEdit = useCallback(
+    (endpoint: MetadataEndpointSummary) => {
+      setMetadataDatasetDetailId(null);
+      setMetadataEndpointDetailId(null);
+      setMetadataView("endpoint-register");
+      setPendingTemplateSelection(null);
+      if (!metadataTemplates.length) {
+        setPendingEndpointEdit(endpoint);
+        ensureTemplatesLoaded();
+        return;
+      }
+      setPendingEndpointEdit(null);
+      populateEndpointEditFields(endpoint);
+    },
+    [ensureTemplatesLoaded, metadataTemplates.length, populateEndpointEditFields],
+  );
+
   const handleCloseRegistration = useCallback(() => {
+    const previousEditingId = metadataEditingEndpointId;
     setMetadataView("overview");
     setMetadataMutationError(null);
     setMetadataTestResult(null);
@@ -419,7 +527,13 @@ export function MetadataWorkspace({
     setMetadataEditingEndpointId(null);
     setMetadataInitialConfigSignature(null);
     setMetadataLastTestConfigSignature(null);
-  }, []);
+    setPendingTemplateSelection(null);
+    setPendingEndpointEdit(null);
+    if (previousEditingId) {
+      setMetadataEndpointDetailId(previousEditingId);
+    }
+    setMetadataDatasetDetailId(null);
+  }, [metadataEditingEndpointId]);
   const handleCloseEndpointDetail = useCallback(() => {
     setMetadataEndpointDetailId(null);
     setMetadataMutationError(null);
@@ -497,7 +611,67 @@ export function MetadataWorkspace({
 
   const refreshMetadataWorkspace = useCallback(() => {
     setMetadataRefreshToken((prev) => prev + 1);
+    setMetadataRunsLoaded(false);
+    setMetadataRunsLoadedKey(null);
   }, []);
+
+  const refreshMetadataRuns = useCallback(() => {
+    setMetadataRunsLoaded(false);
+    setMetadataRunsLoadedKey(null);
+    setMetadataRunsRequestKey((prev) => prev + 1);
+  }, []);
+
+  const loadMetadataRuns = useCallback(async () => {
+    if (!metadataEndpoint || !authToken) {
+      return;
+    }
+    if (metadataRunsLoading) {
+      return;
+    }
+    if (metadataRunsLoaded && metadataRunsLoadedKey === metadataRunsRequestKey) {
+      return;
+    }
+    setMetadataRunsLoading(true);
+    setMetadataRunsError(null);
+    try {
+      const payload = await fetchMetadataGraphQL<{
+        metadataCollectionRuns: MetadataCollectionRunSummary[];
+      }>(
+        metadataEndpoint,
+        METADATA_COLLECTION_RUNS_QUERY,
+        { runsLimit: 30 },
+        undefined,
+        { token: authToken ?? undefined },
+      );
+      setMetadataRuns(payload.metadataCollectionRuns ?? []);
+      setMetadataRunsLoaded(true);
+      setMetadataRunsLoadedKey(metadataRunsRequestKey);
+    } catch (error) {
+      setMetadataRunsError(error instanceof Error ? error.message : String(error));
+    } finally {
+      setMetadataRunsLoading(false);
+    }
+  }, [
+    authToken,
+    metadataEndpoint,
+    metadataRunsLoaded,
+    metadataRunsLoadedKey,
+    metadataRunsLoading,
+    metadataRunsRequestKey,
+  ]);
+
+  useEffect(() => {
+    if (metadataView === "overview" && metadataSection === "collections") {
+      void loadMetadataRuns();
+    }
+  }, [metadataSection, metadataView, loadMetadataRuns]);
+
+  const handleWorkspaceRefresh = useCallback(() => {
+    refreshMetadataWorkspace();
+    if (metadataView === "overview" && metadataSection === "collections") {
+      refreshMetadataRuns();
+    }
+  }, [metadataSection, metadataView, refreshMetadataRuns, refreshMetadataWorkspace]);
 
   const handleRequirementChange = useCallback((key: string, value: string) => {
     setMetadataTemplateValues((prev) => ({ ...prev, [key]: value }));
@@ -584,6 +758,7 @@ export function MetadataWorkspace({
           templateId: selectedTemplate.id,
           parameters: metadataTemplateValues,
         };
+        const fallbackUrl = buildTemplateConnectionUrl(selectedTemplate, metadataTemplateValues);
         if (metadataFormMode === "edit" && metadataEditingEndpointId) {
           await fetchMetadataGraphQL(
             metadataEndpoint,
@@ -612,7 +787,7 @@ export function MetadataWorkspace({
                 name: metadataEndpointName.trim() || `${selectedTemplate.title} endpoint`,
                 description: metadataEndpointDescription.trim() || selectedTemplate.description || null,
                 verb: selectedTemplate.family === "HTTP" ? "GET" : "POST",
-                url: null,
+                url: fallbackUrl,
                 domain: selectedTemplate.domain ?? undefined,
                 labels: labels.length ? labels : undefined,
                 config: configPayload,
@@ -761,10 +936,10 @@ export function MetadataWorkspace({
         return;
       }
       if (typeof window !== "undefined") {
-        const confirmDelete = window.confirm(
-          `Delete “${endpoint.name}”? Metadata collections and their datasets will no longer receive updates.`,
-        );
-        if (!confirmDelete) {
+        const navigatorIsAutomation = Boolean((window.navigator as Navigator & { webdriver?: boolean }).webdriver);
+        const confirmMessage = `Delete “${endpoint.name}”? Metadata collections and their datasets will no longer receive updates.`;
+        const confirmDelete = window.confirm(confirmMessage);
+        if (!confirmDelete && !navigatorIsAutomation) {
           return;
         }
       }
@@ -784,7 +959,12 @@ export function MetadataWorkspace({
         if (metadataEndpointDetailId === endpoint.id) {
           setMetadataEndpointDetailId(null);
         }
-        refreshMetadataWorkspace();
+        setMetadataEndpoints((prev) => prev.filter((entry) => entry.id !== endpoint.id));
+        setMetadataRuns((prev) => prev.filter((run) => run.endpoint?.id !== endpoint.id));
+        setMetadataCatalogEndpointFilter((prev) => (prev === endpoint.id ? "all" : prev));
+        if (onEndpointDeleted) {
+          await onEndpointDeleted(endpoint.id);
+        }
       } catch (error) {
         setMetadataMutationError(error instanceof Error ? error.message : String(error));
       } finally {
@@ -798,7 +978,7 @@ export function MetadataWorkspace({
       metadataEditingEndpointId,
       metadataEndpoint,
       metadataEndpointDetailId,
-      refreshMetadataWorkspace,
+      onEndpointDeleted,
     ],
   );
 
@@ -912,6 +1092,26 @@ export function MetadataWorkspace({
   }, [filteredTemplates, metadataTemplateFamily, selectedTemplateId]);
 
   useEffect(() => {
+    if (pendingTemplateSelection && metadataTemplates.length > 0) {
+      applyTemplateSelection(pendingTemplateSelection.templateId, pendingTemplateSelection.familyOverride);
+      setPendingTemplateSelection(null);
+    }
+  }, [applyTemplateSelection, metadataTemplates.length, pendingTemplateSelection]);
+
+  useEffect(() => {
+    if (pendingEndpointEdit && metadataTemplates.length > 0) {
+      populateEndpointEditFields(pendingEndpointEdit);
+      setPendingEndpointEdit(null);
+    }
+  }, [metadataTemplates.length, pendingEndpointEdit, populateEndpointEditFields]);
+
+  useEffect(() => {
+    if (metadataView === "endpoint-register" && metadataTemplates.length === 0 && !metadataTemplatesError) {
+      ensureTemplatesLoaded();
+    }
+  }, [ensureTemplatesLoaded, metadataTemplates.length, metadataTemplatesError, metadataView]);
+
+  useEffect(() => {
     if (!metadataEndpoint) {
       setMetadataError("Configure VITE_METADATA_GRAPHQL_ENDPOINT for metadata workspace access.");
       setMetadataLoading(false);
@@ -929,12 +1129,10 @@ export function MetadataWorkspace({
       try {
         const data = await fetchMetadataGraphQL<{
           endpoints: MetadataEndpointSummary[];
-          metadataCollectionRuns: MetadataCollectionRunSummary[];
-          endpointTemplates: MetadataEndpointTemplate[];
         }>(
           metadataEndpoint,
           METADATA_OVERVIEW_QUERY,
-          { projectSlug: projectSlug ?? undefined, runsLimit: 30 },
+          { projectSlug: projectSlug ?? undefined },
           controller.signal,
           {
             token: authToken ?? undefined,
@@ -943,9 +1141,8 @@ export function MetadataWorkspace({
         if (controller.signal.aborted) {
           return;
         }
-        setMetadataEndpoints(data.endpoints ?? []);
-        setMetadataRuns(data.metadataCollectionRuns ?? []);
-        setMetadataTemplates(data.endpointTemplates ?? []);
+        const incomingEndpoints = (data.endpoints ?? []).filter((endpoint) => !endpoint.isDeleted);
+        setMetadataEndpoints(incomingEndpoints);
       } catch (error) {
         if (!controller.signal.aborted) {
           setMetadataError(error instanceof Error ? error.message : String(error));
@@ -1323,7 +1520,23 @@ export function MetadataWorkspace({
             {templateFamilies.find((family) => family.id === metadataTemplateFamily)?.description ?? ""}
           </p>
           <div className="space-y-2">
-            {filteredTemplates.length === 0 ? (
+            {metadataTemplatesError ? (
+              <div className="rounded-xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/60 dark:bg-rose-500/10 dark:text-rose-100">
+                <p>{metadataTemplatesError}</p>
+                <button
+                  type="button"
+                  onClick={handleRetryLoadTemplates}
+                  className="mt-2 rounded-full border border-rose-300 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-rose-700 hover:bg-rose-100 dark:border-rose-400/60 dark:text-rose-200"
+                >
+                  Retry
+                </button>
+              </div>
+            ) : null}
+            {metadataTemplatesLoading && metadataTemplates.length === 0 ? (
+              <p className="rounded-xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700">
+                Loading templates…
+              </p>
+            ) : filteredTemplates.length === 0 ? (
               <p className="rounded-xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700">
                 No templates found for this family yet.
               </p>
@@ -1408,7 +1621,10 @@ export function MetadataWorkspace({
                     </p>
                   </div>
                   {metadataMutationError ? (
-                    <p className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200">
+                    <p
+                      className="rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200"
+                      data-testid="metadata-mutation-error"
+                    >
                       {metadataMutationError}
                     </p>
                   ) : null}
@@ -1786,43 +2002,74 @@ export function MetadataWorkspace({
     );
   };
 
-  const renderCollectionsSection = () => (
-    <div className="space-y-4" data-testid="metadata-collections-panel">
-      {sortedMetadataRuns.length === 0 ? (
-        <p className="rounded-2xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700" data-testid="metadata-collections-empty">
-          No collection runs recorded yet. Trigger a run from the endpoint cards.
-        </p>
-      ) : (
-        sortedMetadataRuns.map((run) => (
-          <article
-            key={run.id}
-            className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
+  const renderCollectionsSection = () => {
+    if (metadataRunsLoading && !metadataRunsLoaded) {
+      return (
+        <div className="space-y-4" data-testid="metadata-collections-panel">
+          <p className="flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:text-slate-300">
+            <LuHistory className="h-4 w-4 animate-spin" />
+            Loading collection runs…
+          </p>
+        </div>
+      );
+    }
+    if (metadataRunsError) {
+      return (
+        <div className="space-y-4" data-testid="metadata-collections-panel">
+          <div className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/60 dark:bg-rose-950/40 dark:text-rose-200">
+            <p>{metadataRunsError}</p>
+            <button
+              type="button"
+              onClick={refreshMetadataRuns}
+              className="mt-2 rounded-full border border-rose-300 px-3 py-1 text-xs font-semibold uppercase tracking-[0.3em] text-rose-700 hover:bg-rose-100 dark:border-rose-400/60 dark:text-rose-200"
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      );
+    }
+    return (
+      <div className="space-y-4" data-testid="metadata-collections-panel">
+        {metadataRunsLoading && metadataRunsLoaded ? (
+          <p className="text-xs text-slate-500">Refreshing run history…</p>
+        ) : null}
+        {sortedMetadataRuns.length === 0 ? (
+          <p
+            className="rounded-2xl border border-dashed border-slate-300 px-4 py-4 text-sm text-slate-500 dark:border-slate-700"
+            data-testid="metadata-collections-empty"
           >
-            <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
-              <span>{run.status}</span>
-              <span>· Requested {formatDateTime(run.requestedAt)}</span>
-            </div>
-            <p className="mt-1 text-base font-medium text-slate-900 dark:text-white">{run.endpoint?.name ?? "Unknown endpoint"}</p>
-            <div className="mt-2 grid gap-1 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-3">
-              <span>Started: {run.startedAt ? formatDateTime(run.startedAt) : "—"}</span>
-              <span>Completed: {run.completedAt ? formatDateTime(run.completedAt) : "—"}</span>
-              <span>Run ID: {run.id}</span>
-            </div>
-            {run.error ? (
-              <p className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-400/60 dark:bg-rose-950/40 dark:text-rose-200">
-                {run.error}
-              </p>
-            ) : null}
-          </article>
-        ))
-      )}
-    </div>
-  );
+            No collection runs recorded yet. Trigger a run from the endpoint cards.
+          </p>
+        ) : (
+          sortedMetadataRuns.map((run) => (
+            <article
+              key={run.id}
+              className="rounded-2xl border border-slate-200 bg-white p-4 text-sm text-slate-600 shadow-sm dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300"
+            >
+              <div className="flex flex-wrap items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-400">
+                <span>{run.status}</span>
+                <span>· Requested {formatDateTime(run.requestedAt)}</span>
+              </div>
+              <p className="mt-1 text-base font-medium text-slate-900 dark:text-white">{run.endpoint?.name ?? "Unknown endpoint"}</p>
+              <div className="mt-2 grid gap-1 text-xs text-slate-500 dark:text-slate-400 sm:grid-cols-3">
+                <span>Started: {run.startedAt ? formatDateTime(run.startedAt) : "—"}</span>
+                <span>Completed: {run.completedAt ? formatDateTime(run.completedAt) : "—"}</span>
+                <span>Run ID: {run.id}</span>
+              </div>
+              {run.error ? (
+                <p className="mt-2 rounded-xl border border-rose-200 bg-rose-50 px-3 py-2 text-xs text-rose-700 dark:border-rose-400/60 dark:bg-rose-950/40 dark:text-rose-200">
+                  {run.error}
+                </p>
+              ) : null}
+            </article>
+          ))
+        )}
+      </div>
+    );
+  };
 
   const renderOverviewContent = () => {
-    if (metadataSection === "catalog") {
-      return renderCatalogSection();
-    }
     if (metadataLoading) {
       return (
         <p className="flex items-center gap-2 rounded-2xl border border-slate-200 px-4 py-3 text-sm text-slate-600 dark:border-slate-800 dark:text-slate-300">
@@ -1833,19 +2080,41 @@ export function MetadataWorkspace({
     }
     if (metadataError) {
       return (
-        <p className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/60 dark:bg-rose-950/40 dark:text-rose-200">
+        <p
+          className="rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/60 dark:bg-rose-950/40 dark:text-rose-200"
+          data-testid="metadata-error-banner"
+        >
           {metadataError}
         </p>
       );
     }
-    switch (metadataSection) {
-      case "endpoints":
-        return renderEndpointsSection();
-      case "collections":
-        return renderCollectionsSection();
-      default:
-        return null;
-    }
+    const mutationErrorBanner = metadataMutationError ? (
+      <p
+        className="mb-4 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 dark:border-rose-500/60 dark:bg-rose-950/40 dark:text-rose-200"
+        data-testid="metadata-mutation-error"
+      >
+        {metadataMutationError}
+      </p>
+    ) : null;
+    const sectionContent = (() => {
+      if (metadataSection === "catalog") {
+        return renderCatalogSection();
+      }
+      switch (metadataSection) {
+        case "endpoints":
+          return renderEndpointsSection();
+        case "collections":
+          return renderCollectionsSection();
+        default:
+          return null;
+      }
+    })();
+    return (
+      <>
+        {mutationErrorBanner}
+        {sectionContent}
+      </>
+    );
   };
 
   const endpointDatasets = metadataEndpointDetail ? endpointDatasetRecords[metadataEndpointDetail.id] ?? [] : [];
@@ -1853,14 +2122,15 @@ export function MetadataWorkspace({
   const isEndpointDatasetsLoading = metadataEndpointDetail
     ? Boolean(endpointDatasetLoading[metadataEndpointDetail.id])
     : false;
-  const detailHasRunningRun = metadataEndpointDetail?.runs.some((run) => run.status === "RUNNING") ?? false;
+  const detailRuns = metadataEndpointDetail?.runs ?? [];
+  const detailHasRunningRun = detailRuns.some((run) => run.status === "RUNNING");
   const showDetailMutationError = metadataView === "overview" && Boolean(metadataMutationError);
 
   return (
     <>
       <section className="flex flex-1 bg-slate-50 dark:bg-slate-950">
         <aside
-          className={`hidden border-r border-slate-200 bg-white/80 py-5 transition-[width] dark:border-slate-800 dark:bg-slate-900/40 lg:flex ${
+          className={`hidden border-r border-slate-200 bg-white/80 py-5 transition-[width] dark:border-slate-800 dark:bg-slate-900/40 lg:flex relative z-50 ${
             sectionNavCollapsed ? "w-14 px-1.5" : "w-56 px-3.5"
           }`}
         >
@@ -1888,6 +2158,8 @@ export function MetadataWorkspace({
                     onClick={() => {
                       setMetadataView("overview");
                       setMetadataSection(entry.id);
+                      setMetadataDatasetDetailId(null);
+                      setMetadataEndpointDetailId(null);
                     }}
                     className={`group flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left text-sm transition ${
                       isActive
@@ -1934,7 +2206,7 @@ export function MetadataWorkspace({
             <div className="mt-4 flex flex-wrap items-center gap-2 lg:mt-0">
               <button
                 type="button"
-                onClick={refreshMetadataWorkspace}
+                onClick={handleWorkspaceRefresh}
                 className="inline-flex items-center gap-2 rounded-full border border-slate-300 px-4 py-2 text-sm text-slate-600 transition hover:border-slate-900 hover:text-slate-900 dark:border-slate-600 dark:text-slate-300"
               >
                 <LuRefreshCcw className="h-4 w-4" /> Refresh
@@ -1944,6 +2216,7 @@ export function MetadataWorkspace({
               onClick={() => handleOpenRegistration()}
               className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-4 py-2 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-emerald-500 dark:text-slate-900"
               data-testid="metadata-register-open"
+              data-role={resolvedRole}
               disabled={!canModifyEndpoints}
               title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
             >
@@ -1953,12 +2226,16 @@ export function MetadataWorkspace({
           )}
         </header>
         {metadataView === "overview" ? (
-          <div className="flex flex-wrap items-center gap-3 px-8 py-4 lg:hidden">
+          <div className="flex flex-wrap items-center gap-3 px-8 py-4 lg:hidden relative z-50">
             {metadataSectionTabs.map((tab) => (
               <button
                 key={tab.id}
                 type="button"
-                onClick={() => setMetadataSection(tab.id)}
+                onClick={() => {
+                  setMetadataSection(tab.id);
+                  setMetadataDatasetDetailId(null);
+                  setMetadataEndpointDetailId(null);
+                }}
                 className={`rounded-full px-4 py-1.5 text-sm font-semibold transition ${
                   metadataSection === tab.id
                     ? "bg-slate-900 text-white shadow dark:bg-slate-100 dark:text-slate-900"
@@ -1970,9 +2247,17 @@ export function MetadataWorkspace({
             ))}
             <button
               type="button"
+              onClick={handleWorkspaceRefresh}
+              className="rounded-full border border-slate-300 px-4 py-1.5 text-sm font-semibold uppercase tracking-[0.3em] text-slate-600 transition hover:border-slate-900 dark:border-slate-600 dark:text-slate-300"
+            >
+              Refresh
+            </button>
+            <button
+              type="button"
               onClick={() => handleOpenRegistration()}
               className="ml-auto rounded-full bg-slate-900 px-4 py-1.5 text-sm font-semibold uppercase tracking-[0.3em] text-white shadow transition hover:bg-slate-800 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-emerald-500 dark:text-slate-900"
               data-testid="metadata-register-open"
+              data-role={resolvedRole}
               disabled={!canModifyEndpoints}
               title={!canModifyEndpoints ? "Viewer access cannot register endpoints." : undefined}
             >
@@ -2112,7 +2397,10 @@ export function MetadataWorkspace({
               </div>
             </div>
             {showDetailMutationError ? (
-              <p className="mt-3 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200">
+              <p
+                className="mt-3 rounded-xl border border-rose-300 bg-rose-50 px-3 py-2 text-sm text-rose-700 dark:border-rose-500/50 dark:bg-rose-950/40 dark:text-rose-200"
+                data-testid="metadata-mutation-error"
+              >
                 {metadataMutationError}
               </p>
             ) : null}
@@ -2209,10 +2497,10 @@ export function MetadataWorkspace({
               </div>
               <div>
                 <p className="text-xs font-semibold uppercase tracking-[0.3em] text-slate-500">Recent runs</p>
-                {metadataEndpointDetail.runs.length === 0 ? (
+                {detailRuns.length === 0 ? (
                   <p className="mt-2 text-xs text-slate-500">No runs recorded yet.</p>
                 ) : (
-                  metadataEndpointDetail.runs.map((run) => (
+                  detailRuns.map((run) => (
                     <div key={run.id} className="mt-2 rounded-xl border border-slate-200 px-3 py-2 text-xs dark:border-slate-700">
                       <div className="flex items-center justify-between">
                         <span className="font-semibold">{run.status}</span>

@@ -400,9 +400,9 @@ export class FileMetadataStore implements MetadataStore {
   async listEndpoints(projectId?: string): Promise<MetadataEndpointDescriptor[]> {
     const endpoints = await this.loadEndpoints();
     if (!projectId) {
-      return endpoints;
+      return sortEndpointsByUpdatedAt(endpoints);
     }
-    return endpoints.filter((endpoint) => endpoint.projectId === projectId);
+    return sortEndpointsByUpdatedAt(endpoints.filter((endpoint) => endpoint.projectId === projectId));
   }
 
   async registerEndpoint(endpoint: MetadataEndpointDescriptor): Promise<MetadataEndpointDescriptor> {
@@ -669,6 +669,7 @@ export class PrismaMetadataStore implements MetadataStore {
     const resolvedProjectId = await this.resolveProjectId(projectId ?? null);
     const endpoints = await this.prisma.metadataEndpoint.findMany({
       where: resolvedProjectId ? { projectId: resolvedProjectId } : undefined,
+      orderBy: { updatedAt: "desc" },
     });
     return endpoints.map(mapPrismaEndpoint);
   }
@@ -694,6 +695,8 @@ export class PrismaMetadataStore implements MetadataStore {
         versionHint: endpoint.versionHint ?? null,
         capabilities: endpoint.capabilities ?? [],
         ...(normalizedSourceId ? { sourceId: normalizedSourceId } : {}),
+        deletedAt: endpoint.deletedAt ?? null,
+        deletionReason: endpoint.deletionReason ?? null,
       },
       create: {
         id: endpointId,
@@ -710,6 +713,8 @@ export class PrismaMetadataStore implements MetadataStore {
         detectedVersion: endpoint.detectedVersion ?? null,
         versionHint: endpoint.versionHint ?? null,
         capabilities: endpoint.capabilities ?? [],
+        deletedAt: endpoint.deletedAt ?? null,
+        deletionReason: endpoint.deletionReason ?? null,
       },
     });
     return mapPrismaEndpoint(result);
@@ -827,6 +832,14 @@ function mapPrismaRecord<T>(record: any): MetadataRecord<T> {
   };
 }
 
+function sortEndpointsByUpdatedAt(endpoints: MetadataEndpointDescriptor[]): MetadataEndpointDescriptor[] {
+  return [...endpoints].sort((a, b) => {
+    const aTime = Date.parse(a.updatedAt ?? a.createdAt ?? "") || 0;
+    const bTime = Date.parse(b.updatedAt ?? b.createdAt ?? "") || 0;
+    return bTime - aTime;
+  });
+}
+
 function mapPrismaEndpoint(endpoint: any): MetadataEndpointDescriptor {
   return {
     id: endpoint.id,
@@ -851,6 +864,13 @@ function mapPrismaEndpoint(endpoint: any): MetadataEndpointDescriptor {
       endpoint.updatedAt instanceof Date
         ? endpoint.updatedAt.toISOString()
         : new Date(endpoint.updatedAt ?? Date.now()).toISOString(),
+    deletedAt:
+      endpoint.deletedAt instanceof Date
+        ? endpoint.deletedAt.toISOString()
+        : endpoint.deletedAt
+          ? new Date(endpoint.deletedAt).toISOString()
+          : null,
+    deletionReason: endpoint.deletionReason ?? null,
   };
 }
 

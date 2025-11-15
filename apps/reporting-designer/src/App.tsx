@@ -167,6 +167,32 @@ const formatEditorContent = (input: string, context: EditorContext): string => {
   return output.trim() ? `${output.trim()}\n` : output;
 };
 
+const datasetMatchesEndpoint = (dataset: CatalogDataset, rawEndpointId: string | null | undefined): boolean => {
+  if (!rawEndpointId) {
+    return false;
+  }
+  const normalized = rawEndpointId.trim();
+  if (!normalized.length) {
+    return false;
+  }
+  if (dataset.sourceEndpointId && dataset.sourceEndpointId.trim() === normalized) {
+    return true;
+  }
+  const labels = dataset.labels ?? [];
+  return labels.some((label) => {
+    if (!label) {
+      return false;
+    }
+    if (label === `endpoint:${normalized}`) {
+      return true;
+    }
+    if (label.startsWith("endpoint:")) {
+      return label.slice("endpoint:".length).trim() === normalized;
+    }
+    return false;
+  });
+};
+
 type HealthPayload = {
   status: string;
   version: string;
@@ -779,6 +805,15 @@ export function App() {
     return window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
   });
   const auth = useAuth();
+  useEffect(() => {
+    if (import.meta.env.DEV && typeof window !== "undefined") {
+      (window as typeof window & { __metadataRuntimeUser?: typeof auth.user }).__metadataRuntimeUser = auth.user;
+    }
+    if (import.meta.env.DEV) {
+      // eslint-disable-next-line no-console
+      console.info("[App] auth user role", auth.user?.role);
+    }
+  }, [auth.user]);
   const registryClient = useMemo(
     () =>
       createGraphQLReportingRegistryClient({
@@ -878,6 +913,51 @@ export function App() {
   });
   const editorContext = useMemo(() => detectEditorContext(versionForm.queryTemplate, editorMode), [versionForm.queryTemplate, editorMode]);
   const metadataCompletions = useMetadataCompletions({ datasets: catalogDatasets, selectedDatasetIds, macros: definitionMacros });
+  const syncDatasetSelection = useCallback(
+    (nextDatasets: CatalogDataset[]) => {
+      const remainingIds = new Set(nextDatasets.map((dataset) => dataset.id));
+      setSelectedDatasetIds((prev) => prev.filter((id) => remainingIds.has(id)));
+      setFocusedDatasetId((prev) => (prev && remainingIds.has(prev) ? prev : nextDatasets[0]?.id ?? null));
+    },
+    [setFocusedDatasetId, setSelectedDatasetIds],
+  );
+  const handleEndpointDeleted = useCallback(
+    async (endpointId: string) => {
+      const normalized = endpointId?.trim();
+      if (!normalized) {
+        return;
+      }
+      setCatalogDatasets((prev) => {
+        const next = prev.filter((dataset) => !datasetMatchesEndpoint(dataset, normalized));
+        syncDatasetSelection(next);
+        return next;
+      });
+      if (!metadataClient) {
+        return;
+      }
+      try {
+        const refreshed = await metadataClient.listDatasets();
+        setCatalogDatasets(() => {
+          const next = refreshed.filter((dataset) => !datasetMatchesEndpoint(dataset, normalized));
+          syncDatasetSelection(next);
+          return next;
+        });
+      } catch (error) {
+        if (import.meta.env.DEV) {
+          // eslint-disable-next-line no-console
+          console.warn("[Metadata] failed to refresh datasets after delete", error);
+        }
+      }
+    },
+    [metadataClient, syncDatasetSelection],
+  );
+  useEffect(() => {
+    if (import.meta.env.DEV && typeof window !== "undefined") {
+      (window as typeof window & { __catalogDatasets?: CatalogDataset[] }).__catalogDatasets = catalogDatasets;
+      // eslint-disable-next-line no-console
+      console.info("[App] catalog datasets count", catalogDatasets.length);
+    }
+  }, [catalogDatasets]);
   const monacoRef = useRef<typeof Monaco | null>(null);
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const editorDecorationsRef = useRef<string[]>([]);
@@ -2295,8 +2375,15 @@ export function App() {
     if (!auth.user) {
       return "??";
     }
-    return auth.user.displayName
-      .split(" ")
+    const source = auth.user.username ?? auth.user.displayName ?? auth.user.email ?? "??";
+    const tokens = source
+      .replace(/@.*/, "")
+      .split(/[\s._-]+/)
+      .filter((token) => token.length > 0);
+    if (!tokens.length) {
+      return "??";
+    }
+    return tokens
       .map((part) => part[0])
       .join("")
       .slice(0, 2)
@@ -2407,8 +2494,10 @@ export function App() {
           {auth.user ? (
             navExpanded ? (
               <div className="w-full space-y-2 border-t border-white/10 pt-4" data-testid="metadata-user-chip">
-                <p className="text-sm font-semibold text-white">{auth.user.displayName}</p>
-                <p className="text-xs text-slate-400">{auth.user.email}</p>
+                <p className="text-sm font-semibold text-white">
+                  {auth.user.displayName === auth.user.email && auth.user.username ? auth.user.username : auth.user.displayName}
+                </p>
+                <p className="text-xs text-slate-400">{auth.user.email ?? auth.user.username}</p>
                 <p className="text-[11px] font-semibold uppercase tracking-[0.3em] text-slate-500" data-testid="metadata-user-role">
                   {auth.user.role}
                 </p>
@@ -3122,6 +3211,7 @@ const renderManualEditor = () => {
       authToken={auth.token}
       projectSlug={auth.user?.projectId ?? null}
       userRole={auth.user?.role ?? "USER"}
+      onEndpointDeleted={handleEndpointDeleted}
     />
   );
 

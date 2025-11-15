@@ -3,8 +3,18 @@ import Keycloak, { type KeycloakConfig, type KeycloakInstance, type KeycloakLogi
 const AUTO_ATTEMPTS_KEY = "kc:autoAttempts";
 const LAST_ERROR_KEY = "kc:lastError";
 
+const DEFAULT_LOGIN_SCOPE = "openid profile email nucleus-context";
 const RAW_LOGIN_SCOPE = typeof import.meta.env.VITE_KC_SCOPE === "string" ? import.meta.env.VITE_KC_SCOPE : null;
-const KEYCLOAK_LOGIN_SCOPE = RAW_LOGIN_SCOPE && RAW_LOGIN_SCOPE.trim().length > 0 ? RAW_LOGIN_SCOPE.trim() : null;
+const KEYCLOAK_LOGIN_SCOPE =
+  RAW_LOGIN_SCOPE && RAW_LOGIN_SCOPE.trim().length > 0 ? RAW_LOGIN_SCOPE.trim() : DEFAULT_LOGIN_SCOPE;
+if (import.meta.env.DEV) {
+  // eslint-disable-next-line no-console
+  console.info("[Keycloak] login scope", KEYCLOAK_LOGIN_SCOPE ?? "(default)");
+}
+if (typeof window !== "undefined") {
+  (window as typeof window & { __metadataLoginScope?: string }).__metadataLoginScope =
+    KEYCLOAK_LOGIN_SCOPE ?? "";
+}
 
 const resolvedConfig = resolveKeycloakConfig();
 const keycloakInitOptions = {

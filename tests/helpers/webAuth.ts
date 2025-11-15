@@ -28,16 +28,45 @@ export async function loginViaKeycloak(page: Page, credentials?: KeycloakCredent
     console.log(`[metadata:${msg.type()}] ${msg.text()}`);
   });
 
+  if (credentials) {
+    await page.context().clearCookies();
+  }
   await page.goto(`${metadataBase}/`, { waitUntil: "domcontentloaded" });
+  if (credentials) {
+    await page.evaluate(() => {
+      window.sessionStorage.clear();
+      window.localStorage.clear();
+    });
+    await page.reload();
+  }
 
   // If the app is already loaded (session cookie), skip auth entirely.
-  const metadataNav = page.getByRole("button", { name: "Metadata" });
-  if (await metadataNav.isVisible({ timeout: 1000 }).catch(() => false)) {
-    return;
+  const registerButton = page.getByTestId("metadata-register-open").first();
+  const sessionReady = await registerButton.isVisible({ timeout: 5000 }).catch(() => false);
+  if (sessionReady) {
+    if (!credentials) {
+      return;
+    }
+    const expandButton = page.getByRole("button", { name: /Expand sidebar/i });
+    if (await expandButton.isVisible({ timeout: 500 }).catch(() => false)) {
+      await expandButton.click();
+    }
+    const logoutButton = page.getByTestId("metadata-logout-button");
+    if (await logoutButton.isVisible({ timeout: 1000 }).catch(() => false)) {
+      await logoutButton.click();
+      await page.waitForTimeout(500);
+      await page.goto(`${metadataBase}/`, { waitUntil: "domcontentloaded" });
+    } else {
+      await page.evaluate(() => {
+        window.sessionStorage.clear();
+        window.localStorage.clear();
+      });
+      await page.reload();
+    }
   }
 
   const continueButton = page.getByRole("button", { name: /Continue with Keycloak/i });
-  if (await continueButton.isVisible({ timeout: 2000 }).catch(() => false)) {
+  if (await continueButton.isVisible({ timeout: 10000 }).catch(() => false)) {
     await continueButton.click();
   }
 

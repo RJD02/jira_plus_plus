@@ -73,6 +73,7 @@
     "dev:reporting-api:bg:stop": "bash scripts/stop-reporting-api-bg.sh",
     "keycloak:start": "bash scripts/start-keycloak.sh",
     "keycloak:stop": "bash scripts/stop-keycloak.sh",
+    "keycloak:sync-client": "node scripts/keycloak/sync-client.mjs",
     "keycloak:test": "bash scripts/test-keycloak.sh",
     "verify:uat": "bash scripts/verify-uat.sh",
     "test:metadata-ui": "dotenv -e .env -- npx cypress run --spec cypress/e2e/metadata.cy.ts",

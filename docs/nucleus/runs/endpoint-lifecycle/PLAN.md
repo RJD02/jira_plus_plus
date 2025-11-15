@@ -1,5 +1,3 @@
-1. Verify datasets tab + detail drawer render real `endpointDatasets` responses (AC7) and capture evidence (screens/logs) while confirming secrets remain masked (AC8).
-2. Exercise trigger/run chips + capability gating (AC3–AC6) via UI/manual probes; log any deviations in DECISIONS/TODO before adjusting code/tests.
-3. Expand Playwright automation (metadata-auth spec) or supporting helpers to cover datasets tab + trigger chip assertions, keeping suite under ci budget (AC1–AC7).
-4. Run `make ci-check` and inspect perf/contract outputs to ensure AC9–AC10 remain green; iterate on regressions immediately.
-5. Update run artifacts (LOG heartbeat, TODO, QUESTIONS, DECISIONS) and sync/STATE/STORY with latest status once criteria verified.
+1. Document verification for each ACCEPTANCE item (API + UI), capturing evidence from the now-green metadata-auth & metadata-lifecycle runs.
+2. Review DOCS (DECISIONS/TODO/QUESTIONS) and clean up or add follow-ups (e.g., pagination TODO) so remaining scope is tracked.
+3. Update STATE/STORY + final heartbeat once acceptance confirmed; prep for closure or note any final blockers.
