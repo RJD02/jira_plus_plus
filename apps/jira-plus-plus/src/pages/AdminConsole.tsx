@@ -8,6 +8,7 @@ import {
 import clsx from "clsx";
 import { gql, useLazyQuery, useMutation, useQuery } from "@apollo/client";
 import { AlertTriangle, BarChart3, Clock3, Link2, Mail, Pencil, PlusCircle, ServerCog, ShieldCheck, Trash2, Users } from "lucide-react";
+import { useNavigate } from "react-router-dom";
 import { Button } from "../components/ui/button";
 import { Modal } from "../components/ui/modal";
 import { useAuth } from "../providers/AuthProvider";
@@ -604,6 +605,7 @@ const formatDateTime = (value: string | null | undefined) => {
 
 export function AdminConsolePage() {
   const { user } = useAuth();
+  const navigate = useNavigate();
   const { data, loading, error, refetch } = useQuery<AdminConsoleData>(ADMIN_CONSOLE_QUERY);
   const [activeModal, setActiveModal] = useState<ModalType>(null);
   const [importModalOpen, setImportModalOpen] = useState<boolean>(false);
@@ -680,7 +682,6 @@ export function AdminConsolePage() {
   });
   const [weekendSubmitting, setWeekendSubmitting] = useState(false);
 
-  const reportingDesignerUrl = import.meta.env.VITE_REPORTING_DESIGNER_URL ?? window.location.origin;
   const [reportingRunStatus, setReportingRunStatus] = useState<string>("");
   const [reportingRunDefinitionId, setReportingRunDefinitionId] = useState<string>("");
 
@@ -758,9 +759,6 @@ export function AdminConsolePage() {
     }
   }, [fetchLinks, selectedUserId]);
 
-  const handleOpenReportingDesigner = () => {
-    window.open(reportingDesignerUrl, "_blank", "noopener,noreferrer");
-  };
 
   const {
     data: availabilityData,
@@ -1951,7 +1949,7 @@ export function AdminConsolePage() {
             title="Reporting"
             description="Review published report definitions and jump into the designer for deeper changes."
             action={
-              <Button type="button" disabled title="Coming soon">
+              <Button type="button" onClick={() => navigate("/reports")}>
                 Open designer
               </Button>
             }

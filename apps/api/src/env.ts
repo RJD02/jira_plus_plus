@@ -9,8 +9,8 @@ const apiRoot = path.resolve(dirname, "..");
 const repoRoot = path.resolve(apiRoot, "..", "..");
 
 const candidateEnvPaths = [
-  path.join(repoRoot, ".env"),
   path.join(apiRoot, ".env"),
+  path.join(repoRoot, ".env"),
 ];
 
 for (const envPath of candidateEnvPaths) {
