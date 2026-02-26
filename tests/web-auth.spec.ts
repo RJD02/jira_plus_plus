@@ -49,6 +49,8 @@ test("protected route requires Keycloak login and returns to the console", async
   );
 
   await ensureKeycloakLogin(page, username, password);
-  await expect(page).toHaveURL(/^http:\/\/127\.0\.0\.1:5175\/scrum/);
+  // Verify we landed back on the app (not still on Keycloak). Use the configured
+  // WEB_URL so the assertion works regardless of host (localhost, Tailscale IP, etc.).
+  await expect(page).toHaveURL(new RegExp(`^${targetUrl.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
   expect(autoLoginLogs.length).toBeLessThanOrEqual(2);
 });

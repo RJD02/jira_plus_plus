@@ -1,19 +1,27 @@
-# Patch Summary
+# Patch Summary (Revision 4)
 
 ## Files Changed
 
 ### `apps/jira-plus-plus/src/providers/AuthProvider.tsx`
-- **clearAuthState()**: Added `void apolloClient.clearStore()` — cache is now wiped on every auth invalidation path, not just explicit logout.
-- **logout()**: Removed redundant `apolloClient.clearStore()` (now handled by clearAuthState). Removed `apolloClient` from dependency array.
-- **onUnauthorized handler**: Removed `consecutiveUnauth` counter. API rejection with a valid Keycloak token now triggers immediate `logout()` instead of waiting for 3 strikes.
+- **NEW: Token persistence helpers**: `saveKeycloakTokens()`, `loadKeycloakTokens()`, `clearKeycloakTokens()` — sessionStorage-backed storage for Keycloak access, refresh, and ID tokens
+- **syncFromInstance()**: Added `saveKeycloakTokens(instance)` call after successful token-to-user mapping
+- **clearAuthState()**: Added `clearKeycloakTokens()` call to clear persisted tokens on any auth invalidation
+- **init()**: Loads saved tokens via `loadKeycloakTokens()` and passes them to `keycloak.init()`. After init with restored tokens, validates via `updateToken(30)`. If refresh fails, clears stored tokens and falls through to anonymous.
 
-### `apps/jira-plus-plus/src/lib/apollo-client.ts`
-- **errorLink**: Removed `getAuthToken()` guard on `emitUnauthorized()`. UNAUTHENTICATED responses now always trigger the auth cleanup event regardless of in-memory token state.
+### `tests/auth/admin-auth-consistency.spec.ts`
+- **NEW test**: "Session persistence: stored tokens cleared on logout" — verifies tokens are saved to sessionStorage after auth and cleared after logout
+
+### `tests/base-smoke.spec.ts`
+- Updated 3 tests to reflect ADMIN-only Admin Console access (MANAGER no longer has access)
+
+### `tests/edit-jira-site.spec.ts`
+- Updated 1 test: "MANAGER can open edit modal" → "MANAGER is redirected away from /admin (ADMIN-only)"
 
 ## Lines Changed
-~30 lines net (removed more than added due to counter removal).
+~60 lines added to AuthProvider.tsx, ~15 lines modified across test files.
 
 ## No Changes Required
-- `apps/jira-plus-plus/src/App.tsx` — RequireRole already correct
-- `apps/api/src/resolvers.ts` — server-side enforcement already correct
-- `apps/api/src/auth.ts` — token validation already correct
+- `apps/jira-plus-plus/src/lib/apollo-client.ts` — revision 3 fix still correct
+- `apps/jira-plus-plus/src/lib/auth-events.ts` — no changes needed
+- `apps/jira-plus-plus/src/lib/auth-token.ts` — no changes needed
+- `apps/api/src/auth.ts` — server-side validation unchanged

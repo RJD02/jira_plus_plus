@@ -63,6 +63,19 @@ const INITIAL_AUTH_CALLBACK = hasAuthCallbackInUrl();
 const keycloakSingleton = keycloakConfig ? new Keycloak(keycloakConfig) : null;
 let keycloakInitPromise: Promise<boolean> | null = null;
 
+// Mutex for token refresh — prevents concurrent updateToken() calls from racing.
+// When onTokenExpired and onUnauthorized fire simultaneously (e.g. expired access token
+// triggers both), two concurrent refresh requests can invalidate each other if Keycloak
+// has refresh token rotation enabled. This serializes them into a single request.
+let tokenRefreshInFlight: Promise<boolean> | null = null;
+function serializedUpdateToken(instance: KeycloakInstance, minValidity: number): Promise<boolean> {
+  if (tokenRefreshInFlight) return tokenRefreshInFlight;
+  tokenRefreshInFlight = instance.updateToken(minValidity).finally(() => {
+    tokenRefreshInFlight = null;
+  });
+  return tokenRefreshInFlight;
+}
+
 // When Keycloak runs on a different origin (different port in dev), the silent check-sso
 // iframe can never work: Keycloak sends X-Frame-Options: SAMEORIGIN, and the browser
 // blocks the cross-origin iframe. With `silentCheckSsoFallback: true` (the default),
@@ -150,6 +163,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken(null);
       setAuthToken(null);
       setPhase(nextPhase);
+      clearKeycloakTokens();
       void apolloClient.clearStore();
     },
     [apolloClient, hasKeycloak],
@@ -175,6 +189,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setPhase("authenticated");
       setAuthError(null);
       setAutoAttempts(0);
+      saveKeycloakTokens(instance);
     },
     [clearAuthState, setAutoAttempts],
   );
@@ -265,26 +280,47 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const init = async () => {
+      // Read saved tokens OUTSIDE the try block so the catch can access them.
+      // When init fails because restored tokens are expired/invalid, we treat
+      // it as non-fatal (anonymous) instead of an error, so auto-login can fire.
+      //
+      // IMPORTANT: Do NOT restore saved tokens when there's an auth callback in the URL
+      // (?code=...&state=...). keycloak-js processes the callback code FIRST, and passing
+      // stale tokens alongside the code can interfere with the code exchange flow.
+      const savedTokens = INITIAL_AUTH_CALLBACK ? null : loadKeycloakTokens();
+
       try {
         setPhase("checking");
+
         // Dedup: only call init() once. StrictMode's second mount reuses the same
         // promise so the auth code exchange isn't attempted twice.
         if (!keycloakInitPromise) {
-          keycloakInitPromise = instance.init(
-            skipCheckSso
-              ? {
-                  pkceMethod: "S256",
-                  checkLoginIframe: false,
-                  flow: "standard",
-                }
-              : {
-                  onLoad: "check-sso",
-                  pkceMethod: "S256",
-                  silentCheckSsoRedirectUri: buildSilentCheckUri(),
-                  checkLoginIframe: false,
-                  flow: "standard",
-                },
-          );
+          const baseOpts = {
+            pkceMethod: "S256" as const,
+            checkLoginIframe: false,
+            flow: "standard" as const,
+          };
+          keycloakInitPromise = instance.init({
+            ...baseOpts,
+            // Restore persisted tokens so Keycloak can resume the session without a redirect.
+            ...(savedTokens && {
+              token: savedTokens.token,
+              refreshToken: savedTokens.refreshToken,
+              idToken: savedTokens.idToken,
+            }),
+            // Only use check-sso when NOT cross-origin, NOT on a callback URL, and NOT
+            // recovering from login_required. The iframe-based silent check fails
+            // cross-origin; token restore (above) handles that case instead.
+            ...(!skipCheckSso && {
+              onLoad: "check-sso" as const,
+              silentCheckSsoRedirectUri: buildSilentCheckUri(),
+            }),
+          });
+          authLog("init-called", {
+            skipCheckSso,
+            hasRestoredTokens: Boolean(savedTokens),
+            isAuthCallback: INITIAL_AUTH_CALLBACK,
+          });
         }
         const authenticated = await withTimeout(
           keycloakInitPromise,
@@ -292,17 +328,44 @@ export function AuthProvider({ children }: { children: ReactNode }) {
           KEYCLOAK_TIMEOUT_MESSAGE,
         );
         logInit(authenticated);
-        authLog("init-result", { authenticated, cancelled, skipCheckSso });
+        authLog("init-result", { authenticated, cancelled, skipCheckSso, hadSavedTokens: Boolean(savedTokens) });
         if (cancelled) {
           return;
         }
         if (authenticated) {
+          // keycloak-js v23 already calls updateToken(-1) internally when tokens are
+          // passed to init(), so we do NOT need an additional updateToken() here.
+          // Adding one would create a race condition with the internal refresh.
           syncFromInstance(instance);
         } else {
+          // Init returned unauthenticated — clear any stale stored tokens.
+          clearKeycloakTokens();
           clearAuthState("anonymous");
         }
       } catch (error) {
         if (!cancelled) {
+          // If init failed while trying to restore saved tokens (e.g. expired tokens
+          // cause keycloak-js to reject with `undefined`), treat it as non-fatal:
+          // clear stale tokens and go anonymous so the auto-login guard can fire.
+          if (savedTokens) {
+            authLog("init-token-restore-failed", { error: String(error) });
+            clearKeycloakTokens();
+            keycloakInitPromise = null;
+            clearAuthState("anonymous");
+            return;
+          }
+
+          // If init failed during an auth callback code exchange (e.g. PKCE mismatch,
+          // stale code, 400 from token endpoint), also treat as non-fatal. The code
+          // exchange failing doesn't mean the user can't auth — it just means THIS
+          // particular code was invalid. Go anonymous so Sign In button is shown.
+          if (INITIAL_AUTH_CALLBACK) {
+            authLog("init-callback-exchange-failed", { error: String(error) });
+            keycloakInitPromise = null;
+            clearAuthState("anonymous");
+            return;
+          }
+
           // Keycloak JS throws plain objects (e.g. { error: "..." }), not Error
           // instances, so we must check both forms.
           const message =
@@ -354,14 +417,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     instance.onTokenExpired = () => {
-      instance
-        .updateToken(30)
+      authLog("onTokenExpired-fired");
+      serializedUpdateToken(instance, 30)
         .then((refreshed) => {
+          authLog("onTokenExpired-refreshResult", { refreshed });
           if (!cancelled && refreshed) {
             syncFromInstance(instance);
           }
         })
         .catch(() => {
+          authLog("onTokenExpired-refreshFailed");
           if (!cancelled) {
             clearAuthState("anonymous");
           }
@@ -383,8 +448,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         void logout();
         return;
       }
-      keycloakRef.current
-        .updateToken(5)
+      serializedUpdateToken(keycloakRef.current, 5)
         .then((refreshed) => {
           authLog("onUnauthorized-refreshResult", { refreshed });
           if (refreshed && keycloakRef.current) {
@@ -547,6 +611,39 @@ function persistAutoAttempts(value: number) {
     return;
   }
   window.sessionStorage.setItem(AUTO_ATTEMPT_STORAGE_KEY, String(value));
+}
+
+// ── Keycloak token persistence (sessionStorage) ─────────────────────────
+// Allows auth state to survive page reloads without a full-page redirect
+// through Keycloak. Tokens are tab-scoped and cleared on tab close.
+const KC_TOKEN_KEY = "__JPP_KC_TOKEN__";
+const KC_REFRESH_TOKEN_KEY = "__JPP_KC_REFRESH_TOKEN__";
+const KC_ID_TOKEN_KEY = "__JPP_KC_ID_TOKEN__";
+
+function saveKeycloakTokens(instance: KeycloakInstance) {
+  if (typeof window === "undefined") return;
+  try {
+    if (instance.token) window.sessionStorage.setItem(KC_TOKEN_KEY, instance.token);
+    if (instance.refreshToken) window.sessionStorage.setItem(KC_REFRESH_TOKEN_KEY, instance.refreshToken);
+    if (instance.idToken) window.sessionStorage.setItem(KC_ID_TOKEN_KEY, instance.idToken);
+    authLog("tokens-saved");
+  } catch { /* ignore quota errors */ }
+}
+
+function loadKeycloakTokens(): { token: string; refreshToken: string; idToken?: string } | null {
+  if (typeof window === "undefined") return null;
+  const token = window.sessionStorage.getItem(KC_TOKEN_KEY);
+  const refreshToken = window.sessionStorage.getItem(KC_REFRESH_TOKEN_KEY);
+  if (!token || !refreshToken) return null;
+  const idToken = window.sessionStorage.getItem(KC_ID_TOKEN_KEY) ?? undefined;
+  return { token, refreshToken, idToken };
+}
+
+function clearKeycloakTokens() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(KC_TOKEN_KEY);
+  window.sessionStorage.removeItem(KC_REFRESH_TOKEN_KEY);
+  window.sessionStorage.removeItem(KC_ID_TOKEN_KEY);
 }
 
 function consumeAuthErrorFromHash(): { code: string; message: string } | null {

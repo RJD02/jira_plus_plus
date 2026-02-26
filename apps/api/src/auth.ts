@@ -175,7 +175,8 @@ async function resolveKeycloakUser(token: string): Promise<AuthenticatedUser | n
     }
 
     return user;
-  } catch {
+  } catch (err) {
+    console.error("[Auth] resolveKeycloakUser failed:", err);
     return null;
   }
 }
