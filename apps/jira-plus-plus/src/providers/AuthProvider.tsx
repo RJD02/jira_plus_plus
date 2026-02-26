@@ -100,14 +100,16 @@ function authLog(tag: string, data?: Record<string, unknown>) {
   } catch { /* ignore */ }
 }
 
-// Log module-level state on every page load
-authLog("module-init", {
-  hasConfig: Boolean(keycloakConfig),
-  hashError: INITIAL_HASH_ERROR?.code ?? null,
-  authCallback: INITIAL_AUTH_CALLBACK,
-  crossOrigin: IS_KEYCLOAK_CROSS_ORIGIN,
-  url: typeof window !== "undefined" ? window.location.href : "",
-});
+// Log module-level state on every page load (strip hash to avoid leaking tokens)
+if (import.meta.env.DEV) {
+  authLog("module-init", {
+    hasConfig: Boolean(keycloakConfig),
+    hashError: INITIAL_HASH_ERROR?.code ?? null,
+    authCallback: INITIAL_AUTH_CALLBACK,
+    crossOrigin: IS_KEYCLOAK_CROSS_ORIGIN,
+    url: typeof window !== "undefined" ? window.location.origin + window.location.pathname : "",
+  });
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const apolloClient = useApolloClient();
