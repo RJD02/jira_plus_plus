@@ -145,6 +145,12 @@ async function resolveKeycloakUser(token: string): Promise<AuthenticatedUser | n
       // (localhost, Tailscale IP, etc.) depending on how the browser accessed Keycloak
     }) as jwt.JwtPayload;
 
+    // Enforce audience: reject tokens issued for other Keycloak clients in the
+    // same realm. Check azp (authorized party) which Keycloak sets to the client ID.
+    const expectedClientId = env.KEYCLOAK_CLIENT_ID;
+    const azp = claims["azp"] as string | undefined;
+    if (expectedClientId && azp && azp !== expectedClientId) return null;
+
     const email =
       (claims["email"] as string | undefined) ??
       (claims["preferred_username"] as string | undefined);
@@ -226,13 +232,15 @@ function deriveRoleFromClaims(claims: jwt.JwtPayload): Role {
     realmRoles.forEach((r: unknown) => collected.add(String(r).toLowerCase()));
   }
 
+  // Only read resource_access roles for the Jira++ client to prevent
+  // privilege escalation from admin/manager roles in unrelated clients.
   const resourceAccess = claims["resource_access"] as Record<string, { roles?: unknown }> | undefined;
   if (resourceAccess) {
-    Object.values(resourceAccess).forEach((resource) => {
-      if (Array.isArray(resource.roles)) {
-        resource.roles.forEach((r: unknown) => collected.add(String(r).toLowerCase()));
-      }
-    });
+    const clientId = getEnv().KEYCLOAK_CLIENT_ID || "jira-plus-plus";
+    const clientResource = resourceAccess[clientId];
+    if (clientResource && Array.isArray(clientResource.roles)) {
+      clientResource.roles.forEach((r: unknown) => collected.add(String(r).toLowerCase()));
+    }
   }
 
   if (collected.has("admin")) return "ADMIN";

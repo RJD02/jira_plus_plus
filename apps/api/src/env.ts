@@ -69,6 +69,7 @@ const envSchema = z.object({
   REPORTING_API_TENANT_ID: z.string().optional(),
   KEYCLOAK_BASE_URL: z.string().optional(),
   KEYCLOAK_REALM: z.string().default("nucleus"),
+  KEYCLOAK_CLIENT_ID: z.string().default("jira-plus-plus"),
 });
 
 type EnvShape = z.infer<typeof envSchema>;

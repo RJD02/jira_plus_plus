@@ -1036,8 +1036,10 @@ export const resolvers = {
         ];
         let platformUserIdsToDelete: string[] = [];
         if (siteEmails.length > 0) {
+          // Only consider regular USERs for deletion — never delete ADMIN or
+          // MANAGER accounts that happen to share an email with a Jira user.
           const matched = await tx.user.findMany({
-            where: { email: { in: siteEmails }, tenantId },
+            where: { email: { in: siteEmails }, tenantId, role: "USER" },
             select: { id: true },
           });
           const matchedIds = matched.map((u) => u.id);
