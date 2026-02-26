@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Promote UAT code to Production.
@@ -46,7 +46,7 @@ else
 fi
 
 # ── 3. Confirm ───────────────────────────────────────────────
-if [ "$FORCE" \!= "--force" ]; then
+if [ "$FORCE" != "--force" ]; then
   echo ""
   echo "  ╔══════════════════════════════════════════════════╗"
   echo "  ║  PROMOTE UAT → PROD                             ║"
@@ -62,7 +62,7 @@ if [ "$FORCE" \!= "--force" ]; then
   echo "  ╚══════════════════════════════════════════════════╝"
   echo ""
   read -rp "  Proceed? [y/N]: " confirm
-  if [[ "$confirm" \!= "y" && "$confirm" \!= "Y" ]]; then
+  if [[ "$confirm" != "y" && "$confirm" != "Y" ]]; then
     echo "[promote] Aborted."
     exit 0
   fi
@@ -95,7 +95,7 @@ PROD_API_HEALTH=$(docker exec prod-api-1 curl -sf http://localhost:4000/health 2
 if echo "$PROD_API_HEALTH" | grep -q status:ok; then
   echo "[promote] ✓ Prod API is healthy."
 else
-  echo "[promote] ⚠ WARNING: Prod API health check failed after promotion\!" >&2
+  echo "[promote] ⚠ WARNING: Prod API health check failed after promotion!" >&2
   echo "[promote] Response: $PROD_API_HEALTH" >&2
   echo "[promote] You may need to rollback. Previous commit: $PROD_COMMIT" >&2
   exit 1
@@ -103,7 +103,7 @@ fi
 
 echo ""
 echo "[promote] ════════════════════════════════════════════════"
-echo "[promote] Promotion complete\!"
+echo "[promote] Promotion complete!"
 echo "[promote] PROD is now at: $(git -C "$PROD_DIR" rev-parse HEAD)"
 echo "[promote] Previous commit: $PROD_COMMIT"
 echo "[promote] ════════════════════════════════════════════════"

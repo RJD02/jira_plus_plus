@@ -1,4 +1,4 @@
-#\!/usr/bin/env bash
+#!/usr/bin/env bash
 set -euo pipefail
 
 # Deploy a Jira++ environment (UAT or Prod).
@@ -18,12 +18,12 @@ set -euo pipefail
 ENV_FILE=${1:-infra/.env.uat}
 ENVIRONMENT=${2:-uat}
 
-if [ \! -f "$ENV_FILE" ]; then
+if [ ! -f "$ENV_FILE" ]; then
   echo "[deploy] Environment file '$ENV_FILE' not found" >&2
   exit 1
 fi
 
-if [[ "$ENVIRONMENT" \!= "uat" && "$ENVIRONMENT" \!= "prod" ]]; then
+if [[ "$ENVIRONMENT" != "uat" && "$ENVIRONMENT" != "prod" ]]; then
   echo "[deploy] Invalid environment '$ENVIRONMENT'. Must be 'uat' or 'prod'." >&2
   exit 1
 fi
@@ -40,7 +40,7 @@ fi
 # Symlink env file
 ENV_DIR=$(dirname "$ENV_FILE")
 ENV_BASENAME=$(basename "$ENV_FILE")
-if [ "$ENV_BASENAME" \!= ".env" ]; then
+if [ "$ENV_BASENAME" != ".env" ]; then
   ln -sf "$ENV_BASENAME" "$ENV_DIR/.env"
 fi
 
