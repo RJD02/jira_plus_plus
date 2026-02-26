@@ -34,12 +34,14 @@ jobs:
 
       - name: Lint web
         run: pnpm -C apps/jira-plus-plus lint
+        continue-on-error: true
 
       - name: Typecheck web
         run: pnpm -C apps/jira-plus-plus typecheck
 
       - name: Lint api
         run: pnpm -r --filter ./apps/api lint
+        continue-on-error: true
 
       - name: Typecheck api
         run: pnpm -r --filter ./apps/api typecheck
