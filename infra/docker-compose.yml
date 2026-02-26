@@ -1,14 +1,9 @@
-version: "3.9"
-
 services:
   postgres:
     image: pgvector/pgvector:pg15
-    container_name: jira_postgres
     restart: unless-stopped
     env_file:
-      - ../.env
-    ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - .env
     volumes:
       - postgres_data:/var/lib/postgresql/data
     healthcheck:
@@ -21,23 +16,20 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.api
-    container_name: jira_api
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       SHADOW_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
-      # Use the internal Docker hostname so the API can reach Keycloak over the container network
       KEYCLOAK_BASE_URL: http://keycloak:8080
       KEYCLOAK_REALM: nucleus
       SKIP_PRISMA_MIGRATE: ${SKIP_PRISMA_MIGRATE:-}
     depends_on:
       postgres:
         condition: service_healthy
-    ports:
-      - "4000:4000"
     networks:
       - default
+      - traefik-public
       - keycloak_keycloak-network
     restart: unless-stopped
     healthcheck:
@@ -50,9 +42,8 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.worker
-    container_name: jira_worker
     env_file:
-      - ../.env
+      - .env
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       SHADOW_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
@@ -72,19 +63,18 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile.web
-    container_name: jira_web
     env_file:
-      - ../.env
+      - .env
     depends_on:
       api:
         condition: service_healthy
-    ports:
-      - "3000:3000"
     restart: unless-stopped
+    networks:
+      - default
+      - traefik-public
 
   temporal:
     image: temporalio/auto-setup:1.20.1
-    container_name: jira_temporal
     depends_on:
       postgres:
         condition: service_healthy
@@ -98,9 +88,7 @@ services:
       - POSTGRES_HOST=postgres
       - POSTGRES_PWD=${POSTGRES_PASSWORD}
     env_file:
-      - ../.env
-    ports:
-      - "7233:7233"
+      - .env
     healthcheck:
       test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
       interval: 30s
@@ -109,52 +97,20 @@ services:
 
   temporal-ui:
     image: temporalio/ui:2.21.2
-    container_name: jira_temporal_ui
     environment:
       - TEMPORAL_ADDRESS=temporal:7233
     depends_on:
       temporal:
         condition: service_healthy
-    ports:
-      - "8081:8080"
-
-  traefik:
-    image: traefik:v2.11
-    container_name: jira_traefik
-    command:
-      - "--providers.docker=true"
-      - "--providers.docker.exposedbydefault=false"
-      - "--providers.file.filename=/etc/traefik/dynamic.yml"
-      - "--entrypoints.web.address=:80"
-      - "--entrypoints.websecure.address=:443"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge=true"
-      - "--certificatesresolvers.letsencrypt.acme.httpchallenge.entrypoint=web"
-      - "--certificatesresolvers.letsencrypt.acme.email=${ACME_EMAIL}"
-      - "--certificatesresolvers.letsencrypt.acme.storage=/letsencrypt/acme.json"
-      - "--log.level=INFO"
-    ports:
-      - "80:80"
-      - "443:443"
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock:ro
-      - traefik_letsencrypt:/letsencrypt
-      - ./traefik/traefik.yml:/etc/traefik/dynamic.yml:ro
-    env_file:
-      - ../.env
-    restart: unless-stopped
+    networks:
+      - default
+      - traefik-public
 
 volumes:
   postgres_data:
-    name: jira_plus_plus_postgres_data
-  traefik_letsencrypt:
-    name: jira_plus_plus_traefik_letsencrypt
 
 networks:
-  default:
-    name: infra_default
+  traefik-public:
+    external: true
   keycloak_keycloak-network:
-    # Created automatically if Keycloak stack hasn't started yet.
-    # When the Keycloak compose project runs, its identically-named network
-    # will merge with this one, enabling hostname-based discovery.
-    name: keycloak_keycloak-network
-    driver: bridge
+    external: true
