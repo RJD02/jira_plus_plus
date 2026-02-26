@@ -6,14 +6,6 @@ set -euo pipefail
 # Usage: ./infra/deploy.sh [env-file] [environment]
 #   env-file:    path to environment file (default: infra/.env.uat)
 #   environment: "uat" or "prod" (default: uat)
-#
-# This script:
-#   1. Validates environment and env-file
-#   2. Symlinks the env file to .env for Docker Compose
-#   3. Sets the correct build context (UAT builds from /opt/jira-plus-plus/uat)
-#   4. Pulls base images, builds app images, and applies the stack
-#
-# Both environments share a standalone Traefik instance (managed separately).
 
 ENV_FILE=${1:-infra/.env.uat}
 ENVIRONMENT=${2:-uat}
@@ -37,12 +29,14 @@ else
   WORK_DIR="/opt/jira-plus-plus/project"
 fi
 
-# Symlink env file
+# Symlink env file for Docker Compose
 ENV_DIR=$(dirname "$ENV_FILE")
 ENV_BASENAME=$(basename "$ENV_FILE")
 if [ "$ENV_BASENAME" != ".env" ]; then
   ln -sf "$ENV_BASENAME" "$ENV_DIR/.env"
 fi
+# Also symlink at project root (docker compose env_file directive needs it)
+ln -sf "$ENV_FILE" "$WORK_DIR/.env"
 
 # Use compose files from the working directory
 COMPOSE_FILES=(
