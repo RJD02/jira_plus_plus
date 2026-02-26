@@ -1404,7 +1404,7 @@ export function AdminConsolePage() {
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{entry.email}</td>
                       <td className="px-4 py-3">
-                        {entry.id === user?.id ? (
+                        {entry.email === user?.email ? (
                           <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
                             {entry.role.toLowerCase()}
                           </span>

@@ -1024,39 +1024,10 @@ export const resolvers = {
         });
         const projectIds = projects.map((p) => p.id);
 
-        // --- Identify platform users to delete ---
-        // Use JiraAssignableUser emails (site-scoped) as the canonical source
-        // so we catch users created via createUser even if mapUserToProject failed.
-        const assignableUsers = await tx.jiraAssignableUser.findMany({
-          where: { siteId, tenantId },
-          select: { email: true },
-        });
-        const siteEmails = [
-          ...new Set(assignableUsers.map((u) => u.email).filter((e): e is string => !!e)),
-        ];
-        let platformUserIdsToDelete: string[] = [];
-        if (siteEmails.length > 0) {
-          // Only consider regular USERs for deletion — never delete ADMIN or
-          // MANAGER accounts that happen to share an email with a Jira user.
-          const matched = await tx.user.findMany({
-            where: { email: { in: siteEmails }, tenantId, role: "USER" },
-            select: { id: true },
-          });
-          const matchedIds = matched.map((u) => u.id);
-          if (matchedIds.length > 0) {
-            // Keep users who still have links to projects outside this site
-            const otherLinks = await tx.userProjectLink.findMany({
-              where: {
-                userId: { in: matchedIds },
-                tenantId,
-                ...(projectIds.length > 0 ? { projectId: { notIn: projectIds } } : {}),
-              },
-              select: { userId: true },
-            });
-            const stillLinkedElsewhere = new Set(otherLinks.map((l) => l.userId));
-            platformUserIdsToDelete = matchedIds.filter((id) => !stillLinkedElsewhere.has(id));
-          }
-        }
+        // Note: we intentionally do NOT delete platform User records during site
+        // teardown. Email-based matching is unreliable (manually created users can
+        // share emails with Jira assignees) and accidental deletion is irreversible.
+        // Admins can manually remove orphaned users via the Admin Console.
 
         if (projectIds.length > 0) {
           const issues = await tx.issue.findMany({
@@ -1108,12 +1079,6 @@ export const resolvers = {
         }
 
         await tx.jiraAssignableUser.deleteMany({ where: { siteId, tenantId } });
-
-        // Delete platform users imported from this site (after all FK dependants are gone)
-        if (platformUserIdsToDelete.length > 0) {
-          await tx.credential.deleteMany({ where: { userId: { in: platformUserIdsToDelete } } });
-          await tx.user.deleteMany({ where: { id: { in: platformUserIdsToDelete }, tenantId } });
-        }
 
         await tx.jiraSite.delete({ where: { id: siteId } });
       });
