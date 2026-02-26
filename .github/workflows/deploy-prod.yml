@@ -1,0 +1,61 @@
+name: Promote to Production
+
+on:
+  workflow_dispatch:
+    inputs:
+      commit_sha:
+        description: "Commit SHA to deploy (leave empty to use current UAT commit)"
+        required: false
+        default: ""
+
+jobs:
+  promote:
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: https://app.jira-plus-plus.in
+    steps:
+      - name: Install SSH key
+        uses: webfactory/ssh-agent@v0.8.0
+        with:
+          ssh-private-key: ${{ secrets.PROD_SSH_KEY }}
+
+      - name: Promote to production
+        env:
+          COMMIT_INPUT: ${{ github.event.inputs.commit_sha }}
+        run: |
+          ssh -o StrictHostKeyChecking=no ${{ secrets.PROD_SSH_USER }}@${{ secrets.PROD_SSH_HOST }} << REMOTE
+            set -euo pipefail
+            UAT_DIR="/opt/jira-plus-plus/uat"
+            PROD_DIR="/opt/jira-plus-plus/project"
+
+            if [ -n "${COMMIT_INPUT}" ]; then
+              TARGET="${COMMIT_INPUT}"
+            else
+              TARGET=\$(git -C "\$UAT_DIR" rev-parse HEAD)
+            fi
+
+            echo "[promote] Deploying commit: \$TARGET"
+            echo "[promote] UAT HEAD: \$(git -C "\$UAT_DIR" rev-parse --short HEAD)"
+            echo "[promote] PROD current: \$(git -C "\$PROD_DIR" rev-parse --short HEAD)"
+
+            cd "\$PROD_DIR"
+            git fetch origin
+            git checkout "\$TARGET"
+
+            echo "[promote] Running deploy script..."
+            chmod +x infra/deploy.sh
+            ./infra/deploy.sh infra/.env.prod prod
+
+            echo "[promote] Waiting for services..."
+            sleep 15
+
+            HEALTH=\$(docker exec prod-api-1 curl -sf http://localhost:4000/health 2>/dev/null || echo "UNHEALTHY")
+            if echo "\$HEALTH" | grep -q "status"; then
+              echo "[promote] ✓ Production API is healthy"
+            else
+              echo "[promote] ⚠ WARNING: Production API health check failed!"
+              echo "[promote] Response: \$HEALTH"
+              exit 1
+            fi
+          REMOTE

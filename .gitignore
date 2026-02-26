@@ -34,3 +34,7 @@ apps/api/src/generated
 **/__pycache__
 test-results/
 .cache/
+.env.uat
+.env.prod
+infra/.env
+infra/.env.*
