@@ -386,6 +386,20 @@ describe("Admin Console", () => {
         return { data: { triggerProjectSync: true } };
       },
       SendUserInviteEmail: () => ({ data: { sendUserInviteEmail: true } }),
+      UpdateJiraSite: (req) => {
+        const { input } = req.body.variables;
+        const site = state.sites.find((s) => s.id === input.id);
+        if (!site) return { errors: [{ message: "Site not found" }] };
+        if (input.alias) site.alias = input.alias;
+        if (input.adminEmail) site.adminEmail = input.adminEmail;
+        return { data: { updateJiraSite: { id: site.id, alias: site.alias, adminEmail: site.adminEmail } } };
+      },
+      TestJiraConnection: () => ({ data: { testJiraConnection: true } }),
+      DeleteJiraSite: (req) => {
+        const { id } = req.body.variables;
+        state.sites = state.sites.filter((s) => s.id !== id);
+        return { data: { deleteJiraSite: true } };
+      },
     });
   };
 

@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 const webBase = (process.env.WEB_URL ?? "http://127.0.0.1:5175").replace(/\/+$/, "");
 const protectedPath = "/scrum";
 const targetUrl = `${webBase}${protectedPath}`;
-const keycloakBase = (process.env.KEYCLOAK_BASE_URL ?? "http://localhost:8081").replace(/\/+$/, "");
+const keycloakBase = (process.env.KEYCLOAK_BASE_URL ?? "http://100.83.117.14:8082").replace(/\/+$/, "");
 const username = process.env.KEYCLOAK_TEST_USERNAME ?? "dev-writer";
 const password = process.env.KEYCLOAK_TEST_PASSWORD ?? "password";
 
@@ -39,10 +39,13 @@ test("protected route requires Keycloak login and returns to the console", async
       autoLoginLogs.push(msg.text());
     }
   });
-  await page.goto(targetUrl, { waitUntil: "domcontentloaded" });
+  // Use "commit" so goto returns as soon as the server responds, without blocking on
+  // DOMContentLoaded. The actual React load + Keycloak init + auto-login redirect can
+  // take a while on a cold Vite dev server (all modules are fetched fresh every test run).
+  await page.goto(targetUrl, { waitUntil: "commit" });
   await page.waitForURL(
     (url) => url.href.startsWith(`${keycloakBase}/realms/`) && url.href.includes("/protocol/openid-connect/auth"),
-    { timeout: 15_000 },
+    { timeout: 90_000 },
   );
 
   await ensureKeycloakLogin(page, username, password);

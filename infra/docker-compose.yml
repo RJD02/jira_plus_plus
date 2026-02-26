@@ -2,7 +2,7 @@ version: "3.9"
 
 services:
   postgres:
-    image: postgres:15-alpine
+    image: pgvector/pgvector:pg15
     container_name: jira_postgres
     restart: unless-stopped
     env_file:
@@ -25,13 +25,21 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      SHADOW_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SHADOW_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
+      # Use the internal Docker hostname so the API can reach Keycloak over the container network
+      KEYCLOAK_BASE_URL: http://keycloak:8080
+      KEYCLOAK_REALM: nucleus
+      # Skip Prisma migrations on restart (migrations already applied)
+      SKIP_PRISMA_MIGRATE: "1"
     depends_on:
       postgres:
         condition: service_healthy
     ports:
       - "4000:4000"
+    networks:
+      - default
+      - keycloak_keycloak-network
     restart: unless-stopped
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
@@ -47,8 +55,8 @@ services:
     env_file:
       - ../.env
     environment:
-      DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
-      SHADOW_DATABASE_URL: postgresql://postgres:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
+      DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      SHADOW_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
     depends_on:
       api:
         condition: service_healthy
@@ -76,7 +84,7 @@ services:
     restart: unless-stopped
 
   temporal:
-    image: temporalio/server:1.20.1
+    image: temporalio/auto-setup:1.20.1
     container_name: jira_temporal
     depends_on:
       postgres:
@@ -86,7 +94,7 @@ services:
       - DB_PORT=5432
       - POSTGRES_USER=${POSTGRES_USER}
       - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
-      - POSTGRES_DB=${POSTGRES_DB}
+      - POSTGRES_DB=${TEMPORAL_DB:-temporal}
       - POSTGRES_SEEDS=postgres
       - POSTGRES_HOST=postgres
       - POSTGRES_PWD=${POSTGRES_PASSWORD}
@@ -109,7 +117,7 @@ services:
       temporal:
         condition: service_healthy
     ports:
-      - "8080:8080"
+      - "8081:8080"
 
   traefik:
     image: traefik:v2.11
@@ -141,3 +149,9 @@ volumes:
     name: jira_plus_plus_postgres_data
   traefik_letsencrypt:
     name: jira_plus_plus_traefik_letsencrypt
+
+networks:
+  default:
+    name: infra_default
+  keycloak_keycloak-network:
+    external: true

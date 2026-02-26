@@ -13,6 +13,7 @@ function renderEmailTemplate(options: {
   callout: { label: string; value: string };
   outroLines: string[];
   footer: string;
+  appUrl?: string | undefined;
 }): string {
   const bodySections = [
     `<p style="margin:0 0 16px 0;font-size:15px;line-height:22px;color:#1f2937;">${options.greeting}</p>`,
@@ -46,9 +47,11 @@ function renderEmailTemplate(options: {
         <tr>
           <td style="padding:32px;">
             <div style="margin-bottom:24px;">
-              <span style="display:inline-block;padding:8px 14px;border-radius:9999px;background-color:#eef2ff;color:#4338ca;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">
-                Jira++
-              </span>
+              ${
+                options.appUrl
+                  ? `<a href="${options.appUrl}" target="_blank" style="display:inline-block;padding:8px 14px;border-radius:9999px;background-color:#eef2ff;color:#4338ca;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;text-decoration:none;">Jira++</a>`
+                  : `<span style="display:inline-block;padding:8px 14px;border-radius:9999px;background-color:#eef2ff;color:#4338ca;font-size:12px;font-weight:600;letter-spacing:0.08em;text-transform:uppercase;">Jira++</span>`
+              }
             </div>
             ${bodySections.join("\n")}
           </td>
@@ -82,7 +85,7 @@ function buildPasswordEmail(
     const html = renderEmailTemplate({
       greeting: `Hi ${payload.displayName},`,
       introLines: [
-        "Welcome to Jira++. We've created an account for you so you can access project insights and collaboration tools.",
+        "Welcome to Jira++. We’ve created an account for you so you can access project insights and collaboration tools.",
         "To get started, sign in with the temporary password below.",
       ],
       callout: { label: "Temporary password", value: payload.temporaryPassword },
@@ -91,6 +94,7 @@ function buildPasswordEmail(
         `Need help? Reply to this email or contact ${supportEmail}.`,
       ],
       footer: "You’re receiving this email because an administrator provisioned an account for you on Jira++.",
+      appUrl: env.APP_URL,
     });
 
     return {
@@ -124,6 +128,7 @@ function buildPasswordEmail(
       `Didn’t expect this email? Contact ${supportEmail} immediately so we can help secure your account.`,
     ],
     footer: "This notification was sent to keep your Jira++ account secure.",
+    appUrl: env.APP_URL,
   });
 
   return {

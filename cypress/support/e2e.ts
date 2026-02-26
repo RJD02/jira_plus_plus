@@ -3,8 +3,8 @@
 const TOKEN_STORAGE_KEY = "jira-plus-plus/token";
 const USER_STORAGE_KEY = "jira-plus-plus/user";
 
-const defaultMetadataBaseUrl = "http://127.0.0.1:5176";
-const defaultKeycloakBaseUrl = "http://localhost:8081";
+const defaultMetadataBaseUrl = "http://localhost:5176";
+const defaultKeycloakBaseUrl = "http://localhost:8082";
 
 function getEnvString(key: string, fallback: string): string {
   const value = Cypress.env(key);

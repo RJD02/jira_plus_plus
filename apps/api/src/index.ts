@@ -8,17 +8,17 @@ import { createContext } from "./context.js";
 import { getEnv } from "./env.js";
 import { seedAdminUser } from "./auth.js";
 import {
-  exportSummariesToPdf,
-  exportSummariesToSlackPayload,
-  generateSummariesForDate,
-  generateSummaryForUser,
+    exportSummariesToPdf,
+    exportSummariesToSlackPayload,
+    generateSummariesForDate,
+    generateSummaryForUser,
 } from "./services/dailySummaryService.js";
 import {
-  PerformanceReviewError,
-  buildPerformanceMetrics,
-  comparePerformanceMetrics,
-  generatePerformanceSummary,
-  savePerformanceNote,
+    PerformanceReviewError,
+    buildPerformanceMetrics,
+    comparePerformanceMetrics,
+    generatePerformanceSummary,
+    savePerformanceNote,
 } from "./services/performanceReviewService.js";
 import { ensureProjectSummaryAutomationSchedule } from "./services/projectSummaryAutomationService.js";
 
@@ -122,9 +122,12 @@ async function bootstrap() {
     }
   });
 
-  server.listen(env.PORT, () => {
+  const bindHost = env.API_HOST;
+  const displayHost = bindHost === "0.0.0.0" ? "localhost" : bindHost;
+
+  server.listen(env.PORT, bindHost, () => {
     /* eslint-disable no-console */
-    console.log(`🚀 API ready at http://localhost:${env.PORT}/graphql`);
+    console.log(`🚀 API ready at http://${displayHost}:${env.PORT}/graphql`);
   });
 }
 

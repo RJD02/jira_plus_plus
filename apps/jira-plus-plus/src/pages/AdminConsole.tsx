@@ -7,7 +7,7 @@ import {
 } from "react";
 import clsx from "clsx";
 import { gql, useLazyQuery, useMutation, useQuery } from "@apollo/client";
-import { BarChart3, Clock3, Link2, Mail, PlusCircle, ServerCog, ShieldCheck, Users } from "lucide-react";
+import { AlertTriangle, BarChart3, Clock3, Link2, Mail, Pencil, PlusCircle, ServerCog, ShieldCheck, Trash2, Users } from "lucide-react";
 import { Button } from "../components/ui/button";
 import { Modal } from "../components/ui/modal";
 import { useAuth } from "../providers/AuthProvider";
@@ -118,6 +118,28 @@ const REGISTER_SITE_MUTATION = gql`
   }
 `;
 
+const DELETE_JIRA_SITE_MUTATION = gql`
+  mutation DeleteJiraSite($id: ID!) {
+    deleteJiraSite(id: $id)
+  }
+`;
+
+const UPDATE_JIRA_SITE_MUTATION = gql`
+  mutation UpdateJiraSite($input: UpdateJiraSiteInput!) {
+    updateJiraSite(input: $input) {
+      id
+      alias
+      adminEmail
+    }
+  }
+`;
+
+const TEST_JIRA_CONNECTION_MUTATION = gql`
+  mutation TestJiraConnection($siteId: ID!, $email: String!, $apiToken: String!) {
+    testJiraConnection(siteId: $siteId, email: $email, apiToken: $apiToken)
+  }
+`;
+
 const REGISTER_PROJECT_MUTATION = gql`
   mutation RegisterJiraProject($input: RegisterJiraProjectInput!) {
     registerJiraProject(input: $input) {
@@ -142,6 +164,15 @@ const CREATE_USER_MUTATION = gql`
 const RESET_USER_PASSWORD_MUTATION = gql`
   mutation ResetUserPassword($input: ResetUserPasswordInput!) {
     resetUserPassword(input: $input)
+  }
+`;
+
+const UPDATE_USER_ROLE_MUTATION = gql`
+  mutation UpdateUserRole($input: UpdateUserRoleInput!) {
+    updateUserRole(input: $input) {
+      id
+      role
+    }
   }
 `;
 
@@ -616,7 +647,9 @@ export function AdminConsolePage() {
     | null
   >(null);
   const [resetUserPasswordMutation] = useMutation(RESET_USER_PASSWORD_MUTATION);
+  const [updateUserRoleMutation] = useMutation(UPDATE_USER_ROLE_MUTATION);
   const [resettingUserId, setResettingUserId] = useState<string | null>(null);
+  const [updatingRoleUserId, setUpdatingRoleUserId] = useState<string | null>(null);
   const [userActionMessage, setUserActionMessage] = useState<string | null>(null);
   const [userActionError, setUserActionError] = useState<string | null>(null);
   const [availabilityAccountFilter, setAvailabilityAccountFilter] = useState<string>("");
@@ -647,7 +680,7 @@ export function AdminConsolePage() {
   });
   const [weekendSubmitting, setWeekendSubmitting] = useState(false);
 
-  const reportingDesignerUrl = import.meta.env.VITE_REPORTING_DESIGNER_URL ?? "http://localhost:5175";
+  const reportingDesignerUrl = import.meta.env.VITE_REPORTING_DESIGNER_URL ?? window.location.origin;
   const [reportingRunStatus, setReportingRunStatus] = useState<string>("");
   const [reportingRunDefinitionId, setReportingRunDefinitionId] = useState<string>("");
 
@@ -745,6 +778,17 @@ export function AdminConsolePage() {
     CREATE_USER_AVAILABILITY_MUTATION,
   );
   const [deleteAvailability] = useMutation(DELETE_USER_AVAILABILITY_MUTATION);
+  const [deleteSite, { loading: deletingSite }] = useMutation(DELETE_JIRA_SITE_MUTATION);
+  const [deleteSiteTarget, setDeleteSiteTarget] = useState<{ id: string; alias: string } | null>(null);
+  const [deleteSiteStep, setDeleteSiteStep] = useState<1 | 2>(1);
+  const [deleteSiteConfirmText, setDeleteSiteConfirmText] = useState("");
+  const [deleteSiteError, setDeleteSiteError] = useState<string | null>(null);
+  const [editSiteTarget, setEditSiteTarget] = useState<{
+    id: string;
+    alias: string;
+    baseUrl: string;
+    adminEmail: string;
+  } | null>(null);
   const [sendNewsletter, { loading: sendingNewsletter }] = useMutation(SEND_NEWSLETTER_MUTATION);
   const [updateSummarySchedule, { loading: updatingSummarySchedule }] = useMutation(
     UPDATE_PROJECT_SUMMARY_SCHEDULE_MUTATION,
@@ -854,6 +898,24 @@ export function AdminConsolePage() {
       setUserActionError(message);
     } finally {
       setResettingUserId(null);
+    }
+  };
+
+  const handleUpdateRole = async (userId: string, role: string) => {
+    setUserActionMessage(null);
+    setUserActionError(null);
+    setUpdatingRoleUserId(userId);
+    try {
+      await updateUserRoleMutation({
+        variables: { input: { userId, role } },
+      });
+      setUserActionMessage("Role updated successfully.");
+    } catch (mutationError) {
+      const message =
+        mutationError instanceof Error ? mutationError.message : "Failed to update role.";
+      setUserActionError(message);
+    } finally {
+      setUpdatingRoleUserId(null);
     }
   };
 
@@ -1100,14 +1162,15 @@ export function AdminConsolePage() {
             <EmptyState message="No Jira sites registered yet." />
           ) : (
             <div className="overflow-x-auto">
-              <table className="min-w-full divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
+              <table className="w-full table-fixed divide-y divide-slate-200 text-left text-sm dark:divide-slate-800">
                 <thead className="bg-slate-50 text-xs uppercase tracking-wide text-slate-500 dark:bg-slate-900/40 dark:text-slate-400">
                   <tr>
-                    <th className="px-4 py-3 font-semibold">Alias</th>
-                    <th className="px-4 py-3 font-semibold">Base URL</th>
-                    <th className="px-4 py-3 font-semibold">Admin email</th>
-                    <th className="px-4 py-3 font-semibold">Projects</th>
-                    <th className="px-4 py-3 font-semibold">Registered</th>
+                    <th className="w-[12%] px-4 py-3 font-semibold">Alias</th>
+                    <th className="w-[28%] px-4 py-3 font-semibold">Base URL</th>
+                    <th className="w-[22%] px-4 py-3 font-semibold">Admin email</th>
+                    <th className="w-[10%] px-4 py-3 font-semibold">Projects</th>
+                    <th className="w-[14%] px-4 py-3 font-semibold">Registered</th>
+                    <th className="w-[14%] px-4 py-3 font-semibold">Actions</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-200 dark:divide-slate-800">
@@ -1116,17 +1179,18 @@ export function AdminConsolePage() {
                       <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">
                         {site.alias}
                       </td>
-                      <td className="px-4 py-3">
+                      <td className="px-4 py-3 truncate">
                         <a
                           className="text-slate-600 underline transition hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
                           href={site.baseUrl}
                           target="_blank"
                           rel="noreferrer"
+                          title={site.baseUrl}
                         >
                           {site.baseUrl}
                         </a>
                       </td>
-                      <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
+                      <td className="px-4 py-3 truncate text-slate-600 dark:text-slate-300" title={site.adminEmail}>
                         {site.adminEmail}
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
@@ -1134,6 +1198,36 @@ export function AdminConsolePage() {
                       </td>
                       <td className="px-4 py-3 text-slate-500 dark:text-slate-400">
                         {formatDate(site.createdAt)}
+                      </td>
+                      <td className="px-4 py-3 whitespace-nowrap">
+                        <button
+                          type="button"
+                          title="Edit site"
+                          onClick={() => {
+                            setEditSiteTarget({
+                              id: site.id,
+                              alias: site.alias,
+                              baseUrl: site.baseUrl,
+                              adminEmail: site.adminEmail,
+                            });
+                          }}
+                          className="rounded p-1.5 text-slate-400 transition hover:bg-slate-100 hover:text-slate-600 dark:hover:bg-slate-800 dark:hover:text-slate-200"
+                        >
+                          <Pencil className="h-4 w-4" />
+                        </button>
+                        <button
+                          type="button"
+                          title="Delete site"
+                          onClick={() => {
+                            setDeleteSiteTarget({ id: site.id, alias: site.alias });
+                            setDeleteSiteStep(1);
+                            setDeleteSiteConfirmText("");
+                            setDeleteSiteError(null);
+                          }}
+                          className="rounded p-1.5 text-slate-400 transition hover:bg-red-50 hover:text-red-600 dark:hover:bg-red-950/40 dark:hover:text-red-400"
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
                       </td>
                     </tr>
                   ))}
@@ -1260,7 +1354,7 @@ export function AdminConsolePage() {
           )}
         </section>
 
-        <section
+        {user?.role === "ADMIN" && <section
           id="users"
           className="rounded-3xl border border-slate-200 bg-white p-8 shadow-lg shadow-slate-200/60 dark:border-slate-800 dark:bg-slate-900 dark:shadow-slate-950/70"
         >
@@ -1310,9 +1404,22 @@ export function AdminConsolePage() {
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">{entry.email}</td>
                       <td className="px-4 py-3">
-                        <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
-                          {entry.role.toLowerCase()}
-                        </span>
+                        {entry.id === user?.id ? (
+                          <span className="rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300">
+                            {entry.role.toLowerCase()}
+                          </span>
+                        ) : (
+                          <select
+                            value={entry.role}
+                            disabled={updatingRoleUserId === entry.id}
+                            onChange={(e) => { void handleUpdateRole(entry.id, e.target.value); }}
+                            className="rounded-full border border-slate-200 bg-slate-100 px-2 py-1 text-xs font-semibold uppercase tracking-wide text-slate-600 focus:outline-none focus:ring-2 focus:ring-indigo-400 disabled:opacity-50 dark:border-slate-700 dark:bg-slate-800 dark:text-slate-300"
+                          >
+                            <option value="USER">user</option>
+                            <option value="MANAGER">manager</option>
+                            <option value="ADMIN">admin</option>
+                          </select>
+                        )}
                       </td>
                       <td className="px-4 py-3 text-slate-600 dark:text-slate-300">
                         {entry.phone ?? "—"}
@@ -1339,7 +1446,7 @@ export function AdminConsolePage() {
               </table>
             </div>
           )}
-        </section>
+        </section>}
 
         <section
           id="availability"
@@ -1844,7 +1951,7 @@ export function AdminConsolePage() {
             title="Reporting"
             description="Review published report definitions and jump into the designer for deeper changes."
             action={
-              <Button type="button" onClick={handleOpenReportingDesigner}>
+              <Button type="button" disabled title="Coming soon">
                 Open designer
               </Button>
             }
@@ -2081,6 +2188,14 @@ export function AdminConsolePage() {
           void refetch();
         }}
       />
+      <EditSiteModal
+        site={editSiteTarget}
+        onClose={() => setEditSiteTarget(null)}
+        onCompleted={() => {
+          setEditSiteTarget(null);
+          void refetch();
+        }}
+      />
       <RegisterProjectModal
         open={activeModal === "project"}
         onClose={() => setActiveModal(null)}
@@ -2187,6 +2302,87 @@ export function AdminConsolePage() {
           );
         }}
       />
+      {/* ── Delete Jira site — step 1: warning ─────────────────────────── */}
+      <Modal
+        open={deleteSiteTarget !== null && deleteSiteStep === 1}
+        onClose={() => setDeleteSiteTarget(null)}
+        title="Delete Jira site"
+        description={`You are about to permanently delete "${deleteSiteTarget?.alias}".`}
+        primaryAction={
+          <Button
+            onClick={() => setDeleteSiteStep(2)}
+            className="bg-red-600 text-white hover:bg-red-700 dark:bg-red-600 dark:hover:bg-red-700"
+          >
+            I understand, continue
+          </Button>
+        }
+      >
+        <div className="rounded-2xl border border-amber-200 bg-amber-50 p-4 dark:border-amber-700/40 dark:bg-amber-950/30">
+          <div className="flex gap-3">
+            <AlertTriangle className="mt-0.5 h-5 w-5 shrink-0 text-amber-600 dark:text-amber-400" />
+            <div className="text-sm text-amber-800 dark:text-amber-200">
+              <p className="font-semibold">This action cannot be undone.</p>
+              <p className="mt-1">Deleting this site will permanently remove:</p>
+              <ul className="mt-2 list-disc space-y-0.5 pl-4">
+                <li>All registered projects ({deleteSiteTarget ? (sites.find(s => s.id === deleteSiteTarget.id)?.projects.length ?? 0) : 0})</li>
+                <li>All synced issues, comments, and worklogs</li>
+                <li>All daily summaries and AI snapshots</li>
+                <li>All sync jobs, schedules, and logs</li>
+                <li>All user-project mappings for this site</li>
+              </ul>
+            </div>
+          </div>
+        </div>
+      </Modal>
+
+      {/* ── Delete Jira site — step 2: type-to-confirm ──────────────────── */}
+      <Modal
+        open={deleteSiteTarget !== null && deleteSiteStep === 2}
+        onClose={() => setDeleteSiteTarget(null)}
+        title="Confirm deletion"
+        description={`Type the site alias to confirm.`}
+        primaryAction={
+          <Button
+            disabled={deleteSiteConfirmText !== deleteSiteTarget?.alias || deletingSite}
+            onClick={async () => {
+              if (!deleteSiteTarget || deleteSiteConfirmText !== deleteSiteTarget.alias) return;
+              setDeleteSiteError(null);
+              try {
+                await deleteSite({ variables: { id: deleteSiteTarget.id } });
+                setDeleteSiteTarget(null);
+                void refetch();
+              } catch (err) {
+                setDeleteSiteError(err instanceof Error ? err.message : "Deletion failed");
+              }
+            }}
+            className="bg-red-600 text-white hover:bg-red-700 disabled:opacity-50 dark:bg-red-600 dark:hover:bg-red-700"
+          >
+            {deletingSite ? "Deleting…" : "Delete permanently"}
+          </Button>
+        }
+      >
+        <div className="space-y-3">
+          <p className="text-sm text-slate-600 dark:text-slate-300">
+            Type{" "}
+            <span className="rounded bg-slate-100 px-1.5 py-0.5 font-mono text-xs font-semibold text-slate-800 dark:bg-slate-800 dark:text-slate-100">
+              {deleteSiteTarget?.alias}
+            </span>{" "}
+            to confirm:
+          </p>
+          <input
+            type="text"
+            autoFocus
+            value={deleteSiteConfirmText}
+            onChange={(e) => setDeleteSiteConfirmText(e.target.value)}
+            placeholder={deleteSiteTarget?.alias}
+            className="w-full rounded-lg border border-slate-300 bg-white px-3 py-2 text-sm text-slate-900 placeholder-slate-400 focus:border-red-400 focus:outline-none focus:ring-2 focus:ring-red-200 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:placeholder-slate-500 dark:focus:border-red-600 dark:focus:ring-red-900/40"
+          />
+          {deleteSiteError ? (
+            <p className="text-sm text-red-600 dark:text-red-400">{deleteSiteError}</p>
+          ) : null}
+        </div>
+      </Modal>
+
       {error ? (
         <div className="rounded-xl border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600 dark:border-red-900/60 dark:bg-red-950/40 dark:text-red-200">
           {error.message}
@@ -2318,6 +2514,151 @@ function RegisterSiteModal({
         <div className="flex justify-end">
           <Button type="submit" disabled={loading}>
             {loading ? "Saving…" : "Register site"}
+          </Button>
+        </div>
+      </form>
+    </Modal>
+  );
+}
+
+function EditSiteModal({
+  site,
+  onClose,
+  onCompleted,
+}: {
+  site: { id: string; alias: string; baseUrl: string; adminEmail: string } | null;
+  onClose: () => void;
+  onCompleted: () => void;
+}) {
+  const open = site !== null;
+  const [alias, setAlias] = useState("");
+  const [adminEmail, setAdminEmail] = useState("");
+  const [apiToken, setApiToken] = useState("");
+  const [message, setMessage] = useState<string | null>(null);
+  const [successMsg, setSuccessMsg] = useState<string | null>(null);
+  const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [updateSite, { loading: saving }] = useMutation(UPDATE_JIRA_SITE_MUTATION);
+  const [testConnection, { loading: testing }] = useMutation(TEST_JIRA_CONNECTION_MUTATION);
+
+  useEffect(() => {
+    if (site) {
+      setAlias(site.alias);
+      setAdminEmail(site.adminEmail);
+      setApiToken("");
+      setMessage(null);
+      setSuccessMsg(null);
+      setTestMsg(null);
+    }
+  }, [site]);
+
+  const handleSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    setMessage(null);
+    setSuccessMsg(null);
+    if (!site) return;
+
+    const input: Record<string, string> = { id: site.id };
+    if (alias !== site.alias) input.alias = alias;
+    if (adminEmail !== site.adminEmail) input.adminEmail = adminEmail;
+    if (apiToken.length > 0) input.apiToken = apiToken;
+
+    if (Object.keys(input).length <= 1) {
+      setMessage("No changes to save.");
+      return;
+    }
+
+    void updateSite({
+      variables: { input },
+      onCompleted: () => {
+        onCompleted();
+      },
+      onError: (err) => {
+        setMessage(err.message);
+      },
+    });
+  };
+
+  const handleTestConnection = () => {
+    if (!site) return;
+    setTestMsg(null);
+    const email = adminEmail || site.adminEmail;
+    const token = apiToken;
+    if (!token) {
+      setTestMsg("Enter a new API token to test the connection.");
+      return;
+    }
+    void testConnection({
+      variables: { siteId: site.id, email, apiToken: token },
+      onCompleted: () => {
+        setTestMsg("Connection successful!");
+      },
+      onError: (err) => {
+        setTestMsg(`Connection failed: ${err.message}`);
+      },
+    });
+  };
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Edit Jira site"
+      description="Update site credentials. The API token is encrypted before storage and never returned in plain text."
+    >
+      <form className="space-y-4" onSubmit={handleSubmit}>
+        <Input label="Alias" value={alias} onChange={setAlias} placeholder="Acme Cloud Jira" required />
+        <label className="flex flex-col gap-2 text-sm text-slate-600 dark:text-slate-300">
+          <span className="font-medium text-slate-700 dark:text-slate-200">Base URL</span>
+          <input
+            className="rounded-lg border border-slate-200 bg-slate-100 px-3 py-2 text-sm text-slate-500 cursor-not-allowed dark:border-slate-700 dark:bg-slate-800 dark:text-slate-400"
+            value={site?.baseUrl ?? ""}
+            disabled
+            title="Base URL cannot be changed after registration"
+          />
+          <span className="text-xs text-slate-400 dark:text-slate-500">Base URL cannot be changed after registration.</span>
+        </label>
+        <Input
+          label="Admin email"
+          value={adminEmail}
+          onChange={setAdminEmail}
+          placeholder="admin@acme.com"
+          type="email"
+          required
+        />
+        <Input
+          label="API token"
+          value={apiToken}
+          onChange={setApiToken}
+          placeholder="Enter new token to update (leave blank to keep current)"
+          type="password"
+        />
+        {testMsg ? (
+          <InlineMessage tone={testMsg.startsWith("Connection successful") ? "info" : "error"}>
+            {testMsg}
+          </InlineMessage>
+        ) : null}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={handleTestConnection}
+            disabled={testing || !apiToken}
+            className="rounded-lg border border-slate-200 px-3 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            {testing ? "Testing…" : "Test connection"}
+          </button>
+        </div>
+        {message ? <InlineMessage tone="error">{message}</InlineMessage> : null}
+        {successMsg ? <InlineMessage tone="info">{successMsg}</InlineMessage> : null}
+        <div className="flex justify-end gap-2">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-lg border border-slate-200 px-4 py-2 text-sm font-medium text-slate-600 transition hover:bg-slate-50 dark:border-slate-700 dark:text-slate-300 dark:hover:bg-slate-800"
+          >
+            Cancel
+          </button>
+          <Button type="submit" disabled={saving}>
+            {saving ? "Saving…" : "Save changes"}
           </Button>
         </div>
       </form>

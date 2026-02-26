@@ -1,4 +1,5 @@
 import { emitUnauthorized } from "./auth-events";
+import { getAuthToken } from "./auth-token";
 
 const LOCAL_HOSTS = new Set(["localhost", "127.0.0.1", "::1"]);
 
@@ -59,7 +60,10 @@ export async function apiFetch<T>(
 
   if (!response.ok) {
     if (response.status === 401 || response.status === 403) {
-      emitUnauthorized();
+      const tokenPresent = Boolean(init.token ?? getAuthToken());
+      if (tokenPresent) {
+        emitUnauthorized();
+      }
     }
     const errorMessage =
       (payload && typeof payload === "object" && payload && "error" in (payload as Record<string, unknown>))

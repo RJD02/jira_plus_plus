@@ -28,10 +28,13 @@ services:
       KC_DB_PASSWORD: keycloak
       KC_HEALTH_ENABLED: "true"
       KC_METRICS_ENABLED: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HOSTNAME_STRICT: "false"
+      KC_HOSTNAME_STRICT_HTTPS: "false"
     volumes:
       - ./realm-nucleus.json:/opt/keycloak/data/import/realm-nucleus.json:ro
     ports:
-      - "8081:8080"
+      - "8082:8080"
     networks:
       - keycloak-network
 volumes:
