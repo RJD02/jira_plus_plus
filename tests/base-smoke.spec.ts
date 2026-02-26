@@ -58,13 +58,14 @@ test.describe("S2 — Navigation & routing", () => {
     }
   });
 
-  test("shows all nav items for MANAGER", async ({ page }) => {
+  test("shows nav items for MANAGER (no Admin Console)", async ({ page }) => {
     await mockGraphql(page, {});
     await setupMockAuth(page, testUsers.manager);
     await page.goto("/");
-    for (const label of ["Overview", "Daily Scrum", "Developer Focus", "Manager Summary", "Admin Console"]) {
+    for (const label of ["Overview", "Daily Scrum", "Developer Focus", "Manager Summary", "Reports"]) {
       await expect(page.locator(`a:has-text("${label}")`).first()).toBeVisible();
     }
+    await expect(page.locator('a:has-text("Admin Console")')).toHaveCount(0);
   });
 
   test("hides admin/manager nav items for USER role", async ({ page }) => {
@@ -104,14 +105,14 @@ test.describe("S3 — RBAC: Admin Console access", () => {
     await mockGraphql(page, minimalAdminData);
     await setupMockAuth(page, testUsers.admin);
     await page.goto("/admin");
-    await expect(page.locator("text=Jira sites")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Jira sites" })).toBeVisible();
   });
 
-  test("MANAGER can access /admin and sees Jira sites section", async ({ page }) => {
+  test("MANAGER is redirected away from /admin", async ({ page }) => {
     await mockGraphql(page, minimalAdminData);
     await setupMockAuth(page, testUsers.manager);
     await page.goto("/admin");
-    await expect(page.locator("text=Jira sites")).toBeVisible();
+    await expect(page).toHaveURL("/");
   });
 
   test("ADMIN sees Directory/Users section", async ({ page }) => {
@@ -119,15 +120,15 @@ test.describe("S3 — RBAC: Admin Console access", () => {
     await setupMockAuth(page, testUsers.admin);
     await page.goto("/admin");
     await expect(page.locator("section#users")).toBeVisible();
-    await expect(page.locator("text=Directory")).toBeVisible();
+    await expect(page.locator("section#users").getByRole("heading", { name: "Directory" })).toBeVisible();
   });
 
-  test("MANAGER does NOT see Directory/Users section", async ({ page }) => {
+  test("MANAGER cannot access /admin (ADMIN-only)", async ({ page }) => {
     await mockGraphql(page, minimalAdminData);
     await setupMockAuth(page, testUsers.manager);
     await page.goto("/admin");
-    await expect(page.locator("text=Jira sites")).toBeVisible();
-    await expect(page.locator("section#users")).toHaveCount(0);
+    await expect(page).toHaveURL("/");
+    await expect(page.getByRole("heading", { name: "Jira sites" })).not.toBeVisible();
   });
 });
 

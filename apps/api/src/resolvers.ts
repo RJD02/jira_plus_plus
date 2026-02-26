@@ -268,7 +268,7 @@ export const resolvers = {
       );
     },
     reportingDefinitions: async (_parent: unknown, _args: unknown, ctx: RequestContext) => {
-      requireUser(ctx);
+      requireAdminOrManager(ctx);
       const definitions = await ctx.prisma.reportDefinition.findMany({
         where: { tenantId: ctx.tenantId },
         include: {
@@ -296,7 +296,7 @@ export const resolvers = {
       args: { filter?: { status?: string | null; reportVersionId?: string | null } | null },
       ctx: RequestContext,
     ) => {
-      requireUser(ctx);
+      requireAdminOrManager(ctx);
       const where: Record<string, unknown> = { tenantId: ctx.tenantId };
       if (args.filter?.status) where.status = args.filter.status;
       if (args.filter?.reportVersionId) where.reportVersionId = args.filter.reportVersionId;
@@ -322,7 +322,7 @@ export const resolvers = {
       args: { id: string },
       ctx: RequestContext,
     ) => {
-      requireUser(ctx);
+      requireAdminOrManager(ctx);
       const def = await ctx.prisma.reportDefinition.findFirst({
         where: { id: args.id, tenantId: ctx.tenantId },
         include: {
@@ -872,7 +872,7 @@ export const resolvers = {
       args: { input: { id: string; alias?: string | null; adminEmail?: string | null; apiToken?: string | null } },
       ctx: RequestContext,
     ) => {
-      const user = requireAdminOrManager(ctx);
+      const user = requireAdmin(ctx);
       const { id: siteId, alias, adminEmail, apiToken } = args.input;
 
       // Validate inputs

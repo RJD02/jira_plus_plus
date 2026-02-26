@@ -341,6 +341,91 @@ test.describe("BUG-AUTH: Admin console auth state consistency", () => {
     expect(hasUnauthenticated).toBe(true);
   });
 
+  test("Session persistence: stored tokens cleared on logout", async ({
+    page,
+  }) => {
+    // Verifies M4: clearAuthState() removes persisted Keycloak tokens from
+    // sessionStorage, so a subsequent page reload doesn't silently restore a
+    // logged-out session.
+
+    await page.route("**/graphql", async (route) => {
+      const request = route.request();
+      if (request.method() !== "POST") return route.fallback();
+      const body = request.postDataJSON();
+      const opName = extractOperationName(body);
+      if (opName === "AdminConsoleData") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify(ADMIN_CONSOLE_RESPONSE),
+        });
+      }
+      if (opName === "ReportingDefinitions" || opName === "ReportingRuns") {
+        return route.fulfill({
+          status: 200,
+          contentType: "application/json",
+          body: JSON.stringify({ data: { [opName === "ReportingDefinitions" ? "reportingDefinitions" : "reportingRuns"]: [] } }),
+        });
+      }
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ data: {} }),
+      });
+    });
+
+    // Login via Keycloak
+    await loginViaKeycloak(page);
+    await expect(page.getByRole("heading", { name: "Admin Console" })).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Verify tokens were saved to sessionStorage (M2)
+    const hasTokens = await page.evaluate(() => {
+      return Boolean(
+        window.sessionStorage.getItem("__JPP_KC_TOKEN__") &&
+        window.sessionStorage.getItem("__JPP_KC_REFRESH_TOKEN__"),
+      );
+    });
+    expect(hasTokens).toBe(true);
+
+    // Exhaust auto-login so logout doesn't auto-redirect
+    await page.evaluate(() => {
+      window.sessionStorage.setItem("__JPP_AUTH_AUTO_ATTEMPTS__", "2");
+    });
+
+    // Trigger logout by making all queries return UNAUTHENTICATED
+    await page.route("**/graphql", async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify(UNAUTHENTICATED_RESPONSE),
+      });
+    });
+
+    await page.goto(`${webBase}/admin`, { waitUntil: "commit" });
+
+    // Wait for sign-in gate or Keycloak login
+    const signInGate = page.getByRole("heading", { name: "Sign in to continue" });
+    const keycloakLogin = page.locator("input[name='username']");
+    const checkingSession = page.getByText("Checking your session");
+    await expect(
+      signInGate.or(keycloakLogin).or(checkingSession),
+    ).toBeVisible({ timeout: 60_000 });
+
+    // Verify tokens were cleared from sessionStorage (M4)
+    const tokensAfterLogout = await page.evaluate(() => {
+      return {
+        token: window.sessionStorage.getItem("__JPP_KC_TOKEN__"),
+        refreshToken: window.sessionStorage.getItem("__JPP_KC_REFRESH_TOKEN__"),
+        idToken: window.sessionStorage.getItem("__JPP_KC_ID_TOKEN__"),
+      };
+    });
+    expect(tokensAfterLogout.token).toBeNull();
+    expect(tokensAfterLogout.refreshToken).toBeNull();
+    expect(tokensAfterLogout.idToken).toBeNull();
+  });
+
   test("AC-5: no stale admin data visible after auth invalidation", async ({
     page,
   }) => {

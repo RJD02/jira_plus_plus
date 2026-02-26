@@ -67,7 +67,7 @@ async function setupAndVisitAdmin(page: Page, user: TestUser = testUsers.admin) 
   await mockGraphql(page, buildHandlers(sites));
   await setupMockAuth(page, user);
   await page.goto("/admin");
-  await expect(page.locator("text=Jira sites")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Jira sites" })).toBeVisible();
   return sites;
 }
 
@@ -85,9 +85,12 @@ test.describe("AC-1: RBAC & tenant isolation", () => {
     await openEditModal(page, "STAR");
   });
 
-  test("MANAGER can open edit modal", async ({ page }) => {
-    await setupAndVisitAdmin(page, testUsers.manager);
-    await openEditModal(page, "STAR");
+  test("MANAGER is redirected away from /admin (ADMIN-only)", async ({ page }) => {
+    const sites = buildSites();
+    await mockGraphql(page, buildHandlers(sites));
+    await setupMockAuth(page, testUsers.manager);
+    await page.goto("/admin");
+    await expect(page).toHaveURL("/");
   });
 
   test("USER is redirected away from /admin", async ({ page }) => {
@@ -194,7 +197,7 @@ test.describe("AC-6: Audit trail recorded", () => {
     await mockGraphql(page, handlers);
     await setupMockAuth(page, testUsers.admin);
     await page.goto("/admin");
-    await expect(page.locator("text=Jira sites")).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Jira sites" })).toBeVisible();
 
     await openEditModal(page, "STAR");
     await page.locator("input[placeholder='Acme Cloud Jira']").fill("STAR v2");
@@ -217,7 +220,7 @@ test.describe("AC-7: UI behavior", () => {
     await openEditModal(page, "STAR");
     await page.locator("input[placeholder='Acme Cloud Jira']").fill("STAR Renamed");
     await page.locator("button:has-text('Save changes')").click();
-    await expect(page.locator("td:has-text('STAR Renamed')")).toBeVisible();
+    await expect(page.locator("section#sites").getByRole("cell", { name: "STAR Renamed", exact: true })).toBeVisible();
   });
 
   test("cancel discards changes", async ({ page }) => {
@@ -226,7 +229,7 @@ test.describe("AC-7: UI behavior", () => {
     await page.locator("input[placeholder='Acme Cloud Jira']").fill("Should not persist");
     await page.locator("button:has-text('Cancel')").click();
     await expect(page.locator("text=Edit Jira site")).toHaveCount(0);
-    await expect(page.locator("td:has-text('STAR')")).toBeVisible();
+    await expect(page.locator("section#sites").getByRole("cell", { name: "STAR", exact: true })).toBeVisible();
     await expect(page.locator("td:has-text('Should not persist')")).toHaveCount(0);
   });
 
