@@ -153,4 +153,8 @@ networks:
   default:
     name: infra_default
   keycloak_keycloak-network:
-    external: true
+    # Created automatically if Keycloak stack hasn't started yet.
+    # When the Keycloak compose project runs, its identically-named network
+    # will merge with this one, enabling hostname-based discovery.
+    name: keycloak_keycloak-network
+    driver: bridge

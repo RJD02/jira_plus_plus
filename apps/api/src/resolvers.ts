@@ -13,6 +13,7 @@ import {
   verifyPassword,
 } from "./auth.js";
 import { fetchJiraProjectOptions, fetchJiraProjectUsers } from "./jira-client.js";
+import { getTemporalClient } from "./temporal/client.js";
 import {
   sendPasswordResetEmail,
   sendUserInviteEmail,
@@ -1066,6 +1067,30 @@ export const resolvers = {
 
           await tx.performanceReviewNote.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
           await tx.projectTrackedUser.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+
+          // Tear down Temporal schedules before deleting sync job rows, otherwise
+          // orphaned schedules keep firing against deleted projects.
+          const syncJobs = await tx.syncJob.findMany({
+            where: { projectId: { in: projectIds }, tenantId },
+            select: { id: true, scheduleId: true },
+          });
+          if (syncJobs.length > 0) {
+            try {
+              const temporalClient = await getTemporalClient();
+              await Promise.allSettled(
+                syncJobs.map(async (job) => {
+                  try {
+                    const handle = temporalClient.schedule.getHandle(job.scheduleId);
+                    await handle.delete();
+                  } catch {
+                    // Schedule may already be gone — safe to ignore
+                  }
+                }),
+              );
+            } catch {
+              // Temporal unavailable — proceed with DB cleanup regardless
+            }
+          }
           await tx.syncJob.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
           await tx.syncLog.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
           await tx.syncState.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
