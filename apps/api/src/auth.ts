@@ -187,6 +187,15 @@ async function findOrProvisionKeycloakUser(
     });
 
     if (existing) {
+      // Sync role from Keycloak so that role changes (e.g. revoking admin)
+      // propagate immediately instead of staying stale in the local record.
+      if (existing.role !== keycloakRole) {
+        const updated = await tx.user.update({
+          where: { id: existing.id },
+          data: { role: keycloakRole },
+        });
+        return { id: updated.id, email: updated.email, role: updated.role };
+      }
       return { id: existing.id, email: existing.email, role: existing.role };
     }
 

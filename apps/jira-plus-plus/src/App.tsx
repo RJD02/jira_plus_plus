@@ -126,7 +126,7 @@ function Shell() {
           <Route
             path="/admin"
             element={
-              <RequireRole allowedRoles={["ADMIN", "MANAGER"]}>
+              <RequireRole allowedRoles={["ADMIN"]}>
                 <AdminConsolePage />
               </RequireRole>
             }

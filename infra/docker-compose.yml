@@ -30,8 +30,7 @@ services:
       # Use the internal Docker hostname so the API can reach Keycloak over the container network
       KEYCLOAK_BASE_URL: http://keycloak:8080
       KEYCLOAK_REALM: nucleus
-      # Skip Prisma migrations on restart (migrations already applied)
-      SKIP_PRISMA_MIGRATE: "1"
+      SKIP_PRISMA_MIGRATE: ${SKIP_PRISMA_MIGRATE:-}
     depends_on:
       postgres:
         condition: service_healthy
