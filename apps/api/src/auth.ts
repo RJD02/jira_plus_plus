@@ -145,11 +145,14 @@ async function resolveKeycloakUser(token: string): Promise<AuthenticatedUser | n
       // (localhost, Tailscale IP, etc.) depending on how the browser accessed Keycloak
     }) as jwt.JwtPayload;
 
-    // Enforce audience: reject tokens issued for other Keycloak clients in the
-    // same realm. Check azp (authorized party) which Keycloak sets to the client ID.
+    // Enforce audience: reject tokens not issued for the Jira++ Keycloak client.
+    // Require azp to be present and match — tokens without azp are not bound to
+    // any specific client and must not be accepted as API credentials.
     const expectedClientId = env.KEYCLOAK_CLIENT_ID;
-    const azp = claims["azp"] as string | undefined;
-    if (expectedClientId && azp && azp !== expectedClientId) return null;
+    if (expectedClientId) {
+      const azp = claims["azp"] as string | undefined;
+      if (!azp || azp !== expectedClientId) return null;
+    }
 
     const email =
       (claims["email"] as string | undefined) ??
