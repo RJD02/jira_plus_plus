@@ -12,6 +12,7 @@ services:
       - keycloak-db-data:/var/lib/postgresql/data
     networks:
       - keycloak-network
+
   keycloak:
     image: quay.io/keycloak/keycloak:23.0.7
     container_name: keycloak
@@ -31,14 +32,39 @@ services:
       KC_HTTP_ENABLED: "true"
       KC_HOSTNAME_STRICT: "false"
       KC_HOSTNAME_STRICT_HTTPS: "false"
+      KC_PROXY: edge
     volumes:
       - ./realm-nucleus.json:/opt/keycloak/data/import/realm-nucleus.json:ro
     ports:
       - "8082:8080"
     networks:
       - keycloak-network
+      - traefik-public
+    labels:
+      - "traefik.enable=true"
+      - "traefik.docker.network=traefik-public"
+      - "traefik.http.services.keycloak.loadbalancer.server.port=8080"
+      # --- UAT: HTTP routing on IP ---
+      - "traefik.http.routers.keycloak.rule=Host(`157.180.68.89`) && (PathPrefix(`/realms/`) || PathPrefix(`/resources/`) || PathPrefix(`/js/`) || PathPrefix(`/admin/`))"
+      - "traefik.http.routers.keycloak.entrypoints=web"
+      - "traefik.http.routers.keycloak.priority=90"
+      # --- Prod: HTTPS routing on app.jira-plus-plus.in ---
+      - "traefik.http.routers.keycloak-prod.rule=Host(`app.jira-plus-plus.in`) && (PathPrefix(`/realms/`) || PathPrefix(`/resources/`) || PathPrefix(`/js/`))"
+      - "traefik.http.routers.keycloak-prod.entrypoints=websecure"
+      - "traefik.http.routers.keycloak-prod.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.keycloak-prod.priority=90"
+      # --- Prod: HTTP->HTTPS redirect for Keycloak paths ---
+      - "traefik.http.routers.keycloak-prod-http.rule=Host(`app.jira-plus-plus.in`) && (PathPrefix(`/realms/`) || PathPrefix(`/resources/`) || PathPrefix(`/js/`))"
+      - "traefik.http.routers.keycloak-prod-http.entrypoints=web"
+      - "traefik.http.routers.keycloak-prod-http.priority=90"
+      - "traefik.http.routers.keycloak-prod-http.middlewares=keycloak-redirect-https"
+      - "traefik.http.middlewares.keycloak-redirect-https.redirectscheme.scheme=https"
+
 volumes:
   keycloak-db-data: {}
+
 networks:
   keycloak-network:
     driver: bridge
+  traefik-public:
+    external: true
