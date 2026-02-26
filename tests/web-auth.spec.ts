@@ -3,7 +3,7 @@ import { test, expect } from "@playwright/test";
 const webBase = (process.env.WEB_URL ?? "http://127.0.0.1:5175").replace(/\/+$/, "");
 const protectedPath = "/scrum";
 const targetUrl = `${webBase}${protectedPath}`;
-const keycloakBase = (process.env.KEYCLOAK_BASE_URL ?? "http://100.83.117.14:8082").replace(/\/+$/, "");
+const keycloakBase = (process.env.KEYCLOAK_BASE_URL ?? "http://localhost:8082").replace(/\/+$/, "");
 const username = process.env.KEYCLOAK_TEST_USERNAME ?? "dev-writer";
 const password = process.env.KEYCLOAK_TEST_PASSWORD ?? "password";
 

@@ -984,6 +984,7 @@ export const resolvers = {
             Authorization: `Basic ${basic}`,
             Accept: "application/json",
           },
+          signal: AbortSignal.timeout(10_000),
         });
         if (!resp.ok) {
           const body = await resp.text().catch(() => "");
