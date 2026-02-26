@@ -199,10 +199,14 @@ async function findOrProvisionKeycloakUser(
       return { id: existing.id, email: existing.email, role: existing.role };
     }
 
-    // Auto-provision: create the user using the role from their Keycloak token
+    // Auto-provision: upsert to handle concurrent first-login races safely.
+    // Two simultaneous requests for the same new user would both pass the
+    // findUnique above; upsert avoids a unique-constraint failure on (tenantId, email).
     const displayName = email.split("@")[0] ?? email;
-    const newUser = await tx.user.create({
-      data: { tenantId, email, displayName, role: keycloakRole },
+    const newUser = await tx.user.upsert({
+      where: { tenantId_email: { tenantId, email } },
+      update: { role: keycloakRole },
+      create: { tenantId, email, displayName, role: keycloakRole },
     });
 
     return { id: newUser.id, email: newUser.email, role: newUser.role };

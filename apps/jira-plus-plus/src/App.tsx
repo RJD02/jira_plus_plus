@@ -40,7 +40,7 @@ function Shell() {
       items.push({ to: "/reports", label: "Reports" });
     }
 
-    if (user.role === "ADMIN" || user.role === "MANAGER") {
+    if (user.role === "ADMIN") {
       items.push({ to: "/admin", label: "Admin Console" });
     }
 
