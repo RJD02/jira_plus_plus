@@ -12,6 +12,9 @@ services:
       args:
         VITE_GRAPHQL_ENDPOINT: "https://api.jira-plus-plus.in/graphql"
         VITE_API_BASE_URL: "https://api.jira-plus-plus.in"
+        VITE_KEYCLOAK_BASE_URL: "http://157.180.68.89"
+        VITE_KEYCLOAK_REALM: "nucleus"
+        VITE_KEYCLOAK_CLIENT_ID: "jira-plus-plus"
     labels:
       - "traefik.enable=true"
       - "traefik.http.routers.prod-web.rule=Host(`app.jira-plus-plus.in`)"
