@@ -244,7 +244,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
 
     // Test hook: allow Playwright/E2E tests to inject a mock user without Keycloak.
-    const testMock = (window as any).__PLAYWRIGHT_AUTH_MOCK__;
+    // Only available in dev builds to prevent test hooks leaking to production.
+    const testMock = import.meta.env.DEV ? (window as any).__PLAYWRIGHT_AUTH_MOCK__ : undefined;
     if (testMock?.token && testMock?.user) {
       setAuthToken(testMock.token);
       setToken(testMock.token);
@@ -566,13 +567,15 @@ function deriveRole(parsed: KeycloakTokenParsed): Role {
   if (Array.isArray(realmRoles)) {
     realmRoles.forEach((role) => collected.add(String(role).toLowerCase()));
   }
+  // Only read resource_access roles for the Jira++ client to prevent
+  // privilege escalation from admin/manager roles in unrelated clients.
   const resourceAccess = parsed.resource_access as Record<string, { roles?: unknown }> | undefined;
   if (resourceAccess) {
-    Object.values(resourceAccess).forEach((resource) => {
-      if (Array.isArray(resource.roles)) {
-        resource.roles.forEach((role) => collected.add(String(role).toLowerCase()));
-      }
-    });
+    const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "jira-plus-plus";
+    const clientResource = resourceAccess[clientId];
+    if (clientResource && Array.isArray(clientResource.roles)) {
+      clientResource.roles.forEach((role) => collected.add(String(role).toLowerCase()));
+    }
   }
   if (collected.has("admin")) {
     return "ADMIN";
