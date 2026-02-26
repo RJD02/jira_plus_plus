@@ -33,6 +33,7 @@
     "luxon": "^3.5.0",
     "nodemailer": "^6.9.15",
     "p-retry": "^6.0.1",
+    "resend": "^6.9.2",
     "temporalio": "^1.9.3",
     "undici": "^6.12.0",
     "uuid": "^9.0.1",

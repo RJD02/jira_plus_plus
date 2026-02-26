@@ -64,10 +64,27 @@ export async function initializeProjectSync(prisma: PrismaClient, projectId: str
     },
   };
 
-  try {
-    await client.schedule.create(scheduleInput);
-  } catch (error) {
-    if (!(error instanceof Error) || !/Already exists/i.test(error.message)) {
+  // Retry on UNAVAILABLE (Temporal shard not ready yet after startup)
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await client.schedule.create(scheduleInput);
+      break;
+    } catch (error) {
+      if (error instanceof Error && /Already exists/i.test(error.message)) {
+        break; // schedule already exists, nothing to do
+      }
+      const errMsg = error instanceof Error ? error.message : "";
+      const causeMsg = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
+      const isUnavailable =
+        /UNAVAILABLE|shard status unknown|DEADLINE_EXCEEDED|context deadline exceeded|Failed to create schedule/i.test(errMsg) ||
+        /UNAVAILABLE|shard status unknown|DEADLINE_EXCEEDED|context deadline exceeded/i.test(causeMsg);
+      if (isUnavailable && attempt < maxAttempts) {
+        const delay = attempt * 2000;
+        console.warn(`[syncService] Temporal unavailable, retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
       throw error;
     }
   }

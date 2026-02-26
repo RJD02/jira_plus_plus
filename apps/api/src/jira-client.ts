@@ -177,15 +177,12 @@ export async function fetchJiraProjectUsers(
 
   const accountIds = users.map((user) => user.accountId);
 
-  await prisma.$transaction(async (tx) => {
-    if (accountIds.length === 0) {
-      await tx.jiraAssignableUser.deleteMany({
-        where: { tenantId, siteId, projectKey: normalizedKey },
-      });
-      return;
-    }
-
-    await tx.jiraAssignableUser.deleteMany({
+  if (accountIds.length === 0) {
+    await prisma.jiraAssignableUser.deleteMany({
+      where: { tenantId, siteId, projectKey: normalizedKey },
+    });
+  } else {
+    await prisma.jiraAssignableUser.deleteMany({
       where: {
         tenantId,
         siteId,
@@ -196,7 +193,7 @@ export async function fetchJiraProjectUsers(
 
     await Promise.all(
       users.map((user) =>
-        tx.jiraAssignableUser.upsert({
+        prisma.jiraAssignableUser.upsert({
           where: {
             tenantId_siteId_projectKey_accountId: {
               tenantId,
@@ -223,7 +220,7 @@ export async function fetchJiraProjectUsers(
         }),
       ),
     );
-  });
+  }
 
   return users.sort((a, b) => (a.displayName ?? a.accountId).localeCompare(b.displayName ?? b.accountId));
 }

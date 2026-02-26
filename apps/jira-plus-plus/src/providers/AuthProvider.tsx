@@ -25,7 +25,7 @@ interface AuthContextValue {
   error: string | null;
   autoAttempts: number;
   maxAutoAttempts: number;
-  login: () => Promise<void>;
+  login: (options?: { prompt?: "login" | "none" }) => Promise<void>;
   logout: () => Promise<void>;
   registerAutoAttempt: () => void;
 }
@@ -38,10 +38,83 @@ const keycloakConfig = loadKeycloakConfig();
 const KEYCLOAK_INIT_TIMEOUT_MS = Number(import.meta.env.VITE_KEYCLOAK_INIT_TIMEOUT_MS ?? 15000);
 const KEYCLOAK_TIMEOUT_MESSAGE =
   "Keycloak session check timed out. Ensure the Keycloak dev server is running (pnpm keycloak:start).";
+const DISABLE_AUTH_INIT = import.meta.env.VITE_DISABLE_RELOAD_LOOP === "true";
+
+// Read the hash error at module evaluation time (once per page load), not inside a React
+// render or useMemo — React 18 Strict Mode double-invokes component functions and memo
+// factories, so an in-render call would clear the hash on the first invocation and return
+// null on the second, causing initialHashError to always be null in development.
+const INITIAL_HASH_ERROR = consumeAuthErrorFromHash();
+
+// Detect if the current URL contains a Keycloak auth callback (?code=...&state=...).
+// This must be read at module level (like INITIAL_HASH_ERROR) because:
+//  - React 18 StrictMode double-invokes useEffect: first init() processes the code and
+//    cleans the URL, then the second init() on a new instance no longer sees the code.
+//  - Without this flag, the second init() runs check-sso, the iframe fails (cross-origin),
+//    silentCheckSsoFallback triggers a full-page redirect, Keycloak returns a new code, and
+//    the page reloads indefinitely.
+// When true, we skip check-sso so Keycloak processes the code without a redirect fallback.
+const INITIAL_AUTH_CALLBACK = hasAuthCallbackInUrl();
+
+// Module-level Keycloak singleton — ensures the same instance (and its tokens/state)
+// survives React 18 StrictMode's mount → unmount → remount cycle. Without this, StrictMode
+// creates a NEW instance on remount that can't see the auth code already consumed by the
+// first instance, leading to check-sso → silentCheckSsoFallback → redirect loop.
+const keycloakSingleton = keycloakConfig ? new Keycloak(keycloakConfig) : null;
+let keycloakInitPromise: Promise<boolean> | null = null;
+
+// Mutex for token refresh — prevents concurrent updateToken() calls from racing.
+// When onTokenExpired and onUnauthorized fire simultaneously (e.g. expired access token
+// triggers both), two concurrent refresh requests can invalidate each other if Keycloak
+// has refresh token rotation enabled. This serializes them into a single request.
+let tokenRefreshInFlight: Promise<boolean> | null = null;
+function serializedUpdateToken(instance: KeycloakInstance, minValidity: number): Promise<boolean> {
+  if (tokenRefreshInFlight) return tokenRefreshInFlight;
+  tokenRefreshInFlight = instance.updateToken(minValidity).finally(() => {
+    tokenRefreshInFlight = null;
+  });
+  return tokenRefreshInFlight;
+}
+
+// When Keycloak runs on a different origin (different port in dev), the silent check-sso
+// iframe can never work: Keycloak sends X-Frame-Options: SAMEORIGIN, and the browser
+// blocks the cross-origin iframe. With `silentCheckSsoFallback: true` (the default),
+// Keycloak JS falls back to a full-page redirect that causes an infinite reload loop.
+// Detect this at module level so we can skip check-sso entirely and rely on auto-login.
+const IS_KEYCLOAK_CROSS_ORIGIN = isKeycloakCrossOrigin();
+
+// ── Persistent debug log (survives page reloads) ──────────────────────────
+// Check in devtools: JSON.parse(sessionStorage.getItem('__JPP_AUTH_LOG__'))
+const AUTH_LOG_KEY = "__JPP_AUTH_LOG__";
+function authLog(tag: string, data?: Record<string, unknown>) {
+  if (typeof window === "undefined") return;
+  const entry = { t: Date.now(), tag, ...data };
+  // eslint-disable-next-line no-console
+  console.info(`[Auth:${tag}]`, data ?? "");
+  try {
+    const prev = JSON.parse(window.sessionStorage.getItem(AUTH_LOG_KEY) ?? "[]") as unknown[];
+    prev.push(entry);
+    // Keep last 40 entries to avoid bloating storage
+    if (prev.length > 40) prev.splice(0, prev.length - 40);
+    window.sessionStorage.setItem(AUTH_LOG_KEY, JSON.stringify(prev));
+  } catch { /* ignore */ }
+}
+
+// Log module-level state on every page load (strip hash to avoid leaking tokens)
+if (import.meta.env.DEV) {
+  authLog("module-init", {
+    hasConfig: Boolean(keycloakConfig),
+    hashError: INITIAL_HASH_ERROR?.code ?? null,
+    authCallback: INITIAL_AUTH_CALLBACK,
+    crossOrigin: IS_KEYCLOAK_CROSS_ORIGIN,
+    url: typeof window !== "undefined" ? window.location.origin + window.location.pathname : "",
+  });
+}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const apolloClient = useApolloClient();
-  const initialHashError = useMemo(() => consumeAuthErrorFromHash(), []);
+  // Use the module-level constant so Strict Mode double-render doesn't re-evaluate it.
+  const initialHashError = INITIAL_HASH_ERROR;
   const hasKeycloak = Boolean(keycloakConfig);
   const [user, setUser] = useState<AuthUser | null>(null);
   const [token, setToken] = useState<string | null>(null);
@@ -49,11 +122,23 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     if (!hasKeycloak) {
       return "anonymous";
     }
-    return initialHashError ? "error" : "checking";
+    if (!initialHashError) {
+      return "checking";
+    }
+    // "login_required" just means the user isn't authenticated. We still run init()
+    // (without onLoad) to set up endpoints, so start in "checking" like a normal load.
+    if (initialHashError.code === "login_required") {
+      return "checking";
+    }
+    return "error";
   });
-  const [authError, setAuthError] = useState<string | null>(initialHashError?.message ?? null);
+  const [authError, setAuthError] = useState<string | null>(
+    initialHashError && initialHashError.code !== "login_required" ? initialHashError.message : null,
+  );
   const [autoAttemptsState, setAutoAttemptsState] = useState<number>(() => {
-    if (initialHashError) {
+    // Only max out attempts on real errors, not on "login_required" (which is a normal
+    // unauthenticated state — the attempt counter increments when auto-login actually fires).
+    if (initialHashError && initialHashError.code !== "login_required") {
       persistAutoAttempts(MAX_AUTO_ATTEMPTS);
       return MAX_AUTO_ATTEMPTS;
     }
@@ -80,13 +165,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken(null);
       setAuthToken(null);
       setPhase(nextPhase);
+      clearKeycloakTokens();
+      void apolloClient.clearStore();
     },
-    [hasKeycloak],
+    [apolloClient, hasKeycloak],
   );
 
   const syncFromInstance = useCallback(
     (instance: KeycloakInstance) => {
       if (!instance.token) {
+        authLog("sync-noToken");
         clearAuthState("anonymous");
         return;
       }
@@ -94,27 +182,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       setToken(instance.token);
       const mapped = mapTokenToUser(instance.tokenParsed);
       if (!mapped) {
+        authLog("sync-noUser", { hasParsed: Boolean(instance.tokenParsed) });
         clearAuthState("anonymous");
         return;
       }
+      authLog("sync-authenticated", { id: mapped.id, email: mapped.email, role: mapped.role });
       setUser(mapped);
       setPhase("authenticated");
       setAuthError(null);
       setAutoAttempts(0);
+      saveKeycloakTokens(instance);
     },
     [clearAuthState, setAutoAttempts],
   );
 
   const logout = useCallback(async () => {
+    authLog("logout-called", { stack: new Error().stack?.split("\n").slice(1, 4).join(" | ") });
     clearAuthState("anonymous");
     setAutoAttempts(0);
-    await apolloClient.clearStore();
     if (keycloakRef.current && typeof window !== "undefined") {
+      authLog("logout-redirect", { to: window.location.origin });
       await keycloakRef.current.logout({ redirectUri: window.location.origin });
     }
-  }, [apolloClient, clearAuthState, setAutoAttempts]);
+  }, [clearAuthState, setAutoAttempts]);
 
-  const login = useCallback(async () => {
+  const login = useCallback(async (loginOpts?: { prompt?: "login" | "none" }) => {
     if (!keycloakRef.current) {
       // eslint-disable-next-line no-console
       console.warn("Keycloak is not configured; cannot initiate login.");
@@ -122,10 +214,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
     setPhase("authenticating");
     setAuthError(null);
-    const options: KeycloakLoginOptions & { responseMode?: "fragment" | "query"; prompt?: "login" | "none" } = {
+    const options: KeycloakLoginOptions & { prompt?: "login" | "none" } = {
       redirectUri: window.location.href,
-      responseMode: "query",
-      prompt: "login",
+      prompt: loginOpts?.prompt ?? "login",
     };
     await keycloakRef.current.login(options);
   }, []);
@@ -135,16 +226,42 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   }, [setAutoAttempts]);
 
   useEffect(() => {
-    if (!keycloakConfig || typeof window === "undefined") {
+    if (!keycloakSingleton || typeof window === "undefined") {
       setPhase("anonymous");
       return;
     }
-    if (initialHashError) {
+    // Reuse the module-level singleton so the same instance (and its token state)
+    // survives React 18 StrictMode's mount → unmount → remount cycle.
+    const instance = keycloakSingleton;
+    keycloakRef.current = instance;
+    // For real auth errors (not login_required), bail out completely.
+    if (initialHashError && initialHashError.code !== "login_required") {
       return;
     }
-    const instance = new Keycloak(keycloakConfig);
-    keycloakRef.current = instance;
     let cancelled = false;
+
+    if (DISABLE_AUTH_INIT) {
+      setPhase("anonymous");
+      return;
+    }
+
+    // Test hook: allow Playwright/E2E tests to inject a mock user without Keycloak.
+    // Only available in dev builds to prevent test hooks leaking to production.
+    const testMock = import.meta.env.DEV ? (window as any).__PLAYWRIGHT_AUTH_MOCK__ : undefined;
+    if (testMock?.token && testMock?.user) {
+      setAuthToken(testMock.token);
+      setToken(testMock.token);
+      setUser(testMock.user);
+      setPhase("authenticated");
+      return;
+    }
+
+    // When login_required came from the check-sso redirect, we already know the user
+    // isn't authenticated. Run init() WITHOUT onLoad so endpoints are set up (login()
+    // needs them to construct the redirect URL), but skip the check-sso that would
+    // cause another full-page redirect loop.
+    const skipCheckSso =
+      IS_KEYCLOAK_CROSS_ORIGIN || initialHashError?.code === "login_required" || INITIAL_AUTH_CALLBACK;
 
     const logInit = (authenticated: boolean) => {
       if (!import.meta.env.DEV || typeof window === "undefined") {
@@ -155,6 +272,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         authenticated,
         tokenPresent: Boolean(instance.token),
         tokenParsedPresent: Boolean(instance.tokenParsed),
+        skipCheckSso,
       });
       (window as typeof window & { __JPP_AUTH_LAST_INIT__?: unknown }).__JPP_AUTH_LAST_INIT__ = {
         authenticated,
@@ -165,33 +283,118 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     const init = async () => {
+      // Read saved tokens OUTSIDE the try block so the catch can access them.
+      // When init fails because restored tokens are expired/invalid, we treat
+      // it as non-fatal (anonymous) instead of an error, so auto-login can fire.
+      //
+      // IMPORTANT: Do NOT restore saved tokens when there's an auth callback in the URL
+      // (?code=...&state=...). keycloak-js processes the callback code FIRST, and passing
+      // stale tokens alongside the code can interfere with the code exchange flow.
+      const savedTokens = INITIAL_AUTH_CALLBACK ? null : loadKeycloakTokens();
+
       try {
         setPhase("checking");
+
+        // Dedup: only call init() once. StrictMode's second mount reuses the same
+        // promise so the auth code exchange isn't attempted twice.
+        if (!keycloakInitPromise) {
+          const baseOpts = {
+            pkceMethod: "S256" as const,
+            checkLoginIframe: false,
+            flow: "standard" as const,
+          };
+          keycloakInitPromise = instance.init({
+            ...baseOpts,
+            // Restore persisted tokens so Keycloak can resume the session without a redirect.
+            ...(savedTokens && {
+              token: savedTokens.token,
+              refreshToken: savedTokens.refreshToken,
+              idToken: savedTokens.idToken,
+            }),
+            // Only use check-sso when NOT cross-origin, NOT on a callback URL, and NOT
+            // recovering from login_required. The iframe-based silent check fails
+            // cross-origin; token restore (above) handles that case instead.
+            ...(!skipCheckSso && {
+              onLoad: "check-sso" as const,
+              silentCheckSsoRedirectUri: buildSilentCheckUri(),
+            }),
+          });
+          authLog("init-called", {
+            skipCheckSso,
+            hasRestoredTokens: Boolean(savedTokens),
+            isAuthCallback: INITIAL_AUTH_CALLBACK,
+          });
+        }
         const authenticated = await withTimeout(
-          instance.init({
-            onLoad: "check-sso",
-            pkceMethod: "S256",
-            silentCheckSsoRedirectUri: buildSilentCheckUri(),
-            flow: "standard",
-          }),
+          keycloakInitPromise,
           KEYCLOAK_INIT_TIMEOUT_MS,
           KEYCLOAK_TIMEOUT_MESSAGE,
         );
         logInit(authenticated);
+        authLog("init-result", { authenticated, cancelled, skipCheckSso, hadSavedTokens: Boolean(savedTokens) });
         if (cancelled) {
           return;
         }
         if (authenticated) {
+          // keycloak-js v23 already calls updateToken(-1) internally when tokens are
+          // passed to init(), so we do NOT need an additional updateToken() here.
+          // Adding one would create a race condition with the internal refresh.
           syncFromInstance(instance);
         } else {
+          // Init returned unauthenticated — clear any stale stored tokens.
+          clearKeycloakTokens();
           clearAuthState("anonymous");
         }
       } catch (error) {
         if (!cancelled) {
-          clearAuthState("error");
-          setAuthError(error instanceof Error ? error.message : "Keycloak initialization failed");
-          // eslint-disable-next-line no-console
-          console.error("[Auth] Failed to initialize Keycloak", error);
+          // If init failed while trying to restore saved tokens (e.g. expired tokens
+          // cause keycloak-js to reject with `undefined`), treat it as non-fatal:
+          // clear stale tokens and go anonymous so the auto-login guard can fire.
+          if (savedTokens) {
+            authLog("init-token-restore-failed", { error: String(error) });
+            clearKeycloakTokens();
+            keycloakInitPromise = null;
+            clearAuthState("anonymous");
+            return;
+          }
+
+          // If init failed during an auth callback code exchange (e.g. PKCE mismatch,
+          // stale code, 400 from token endpoint), also treat as non-fatal. The code
+          // exchange failing doesn't mean the user can't auth — it just means THIS
+          // particular code was invalid. Go anonymous so Sign In button is shown.
+          if (INITIAL_AUTH_CALLBACK) {
+            authLog("init-callback-exchange-failed", { error: String(error) });
+            keycloakInitPromise = null;
+            clearAuthState("anonymous");
+            return;
+          }
+
+          // Keycloak JS throws plain objects (e.g. { error: "..." }), not Error
+          // instances, so we must check both forms.
+          const message =
+            error instanceof Error
+              ? error.message
+              : typeof error === "object" && error !== null
+                ? String((error as Record<string, unknown>).error ?? JSON.stringify(error))
+                : String(error);
+          authLog("init-error", { message, raw: String(error) });
+          // Treat all non-fatal init failures as "not authenticated" so the
+          // Sign In button is shown. This covers:
+          //  - silent SSO iframe blocked by cross-origin (different ports)
+          //  - our own withTimeout firing before Keycloak's internal timeout
+          //  - network issues reaching Keycloak during init
+          const isInitFailure =
+            message.includes("3rd party check iframe") ||
+            message.includes("Keycloak session check timed out") ||
+            message.includes("Network request failed");
+          if (isInitFailure) {
+            clearAuthState("anonymous");
+          } else {
+            clearAuthState("error");
+            setAuthError(message || "Keycloak initialization failed");
+            // eslint-disable-next-line no-console
+            console.error("[Auth] Failed to initialize Keycloak", error);
+          }
         }
       }
     };
@@ -217,14 +420,16 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     };
 
     instance.onTokenExpired = () => {
-      instance
-        .updateToken(30)
+      authLog("onTokenExpired-fired");
+      serializedUpdateToken(instance, 30)
         .then((refreshed) => {
+          authLog("onTokenExpired-refreshResult", { refreshed });
           if (!cancelled && refreshed) {
             syncFromInstance(instance);
           }
         })
         .catch(() => {
+          authLog("onTokenExpired-refreshFailed");
           if (!cancelled) {
             clearAuthState("anonymous");
           }
@@ -233,26 +438,34 @@ export function AuthProvider({ children }: { children: ReactNode }) {
 
     return () => {
       cancelled = true;
-      keycloakRef.current = null;
+      // Don't null keycloakRef — the singleton persists across StrictMode remounts
+      // and logout()/onUnauthorized still need access to it.
     };
   }, [clearAuthState, initialHashError, syncFromInstance]);
 
   useEffect(() => {
     const unsubscribe = onUnauthorized(() => {
+      authLog("onUnauthorized-fired", { hasRef: Boolean(keycloakRef.current) });
       if (!keycloakRef.current) {
+        authLog("onUnauthorized-logout", { reason: "no keycloakRef" });
         void logout();
         return;
       }
-      keycloakRef.current
-        .updateToken(5)
+      serializedUpdateToken(keycloakRef.current, 5)
         .then((refreshed) => {
+          authLog("onUnauthorized-refreshResult", { refreshed });
           if (refreshed && keycloakRef.current) {
             syncFromInstance(keycloakRef.current);
           } else {
+            // Token is still valid per Keycloak but the API rejected it.
+            // Logout immediately so the user sees the sign-in gate instead
+            // of a broken admin console with error banners.
+            authLog("onUnauthorized-logout", { reason: "api-rejected-valid-token" });
             void logout();
           }
         })
-        .catch(() => {
+        .catch((err) => {
+          authLog("onUnauthorized-refreshError", { error: String(err) });
           void logout();
         });
     });
@@ -356,13 +569,15 @@ function deriveRole(parsed: KeycloakTokenParsed): Role {
   if (Array.isArray(realmRoles)) {
     realmRoles.forEach((role) => collected.add(String(role).toLowerCase()));
   }
+  // Only read resource_access roles for the Jira++ client to prevent
+  // privilege escalation from admin/manager roles in unrelated clients.
   const resourceAccess = parsed.resource_access as Record<string, { roles?: unknown }> | undefined;
   if (resourceAccess) {
-    Object.values(resourceAccess).forEach((resource) => {
-      if (Array.isArray(resource.roles)) {
-        resource.roles.forEach((role) => collected.add(String(role).toLowerCase()));
-      }
-    });
+    const clientId = import.meta.env.VITE_KEYCLOAK_CLIENT_ID || "jira-plus-plus";
+    const clientResource = resourceAccess[clientId];
+    if (clientResource && Array.isArray(clientResource.roles)) {
+      clientResource.roles.forEach((role) => collected.add(String(role).toLowerCase()));
+    }
   }
   if (collected.has("admin")) {
     return "ADMIN";
@@ -403,6 +618,39 @@ function persistAutoAttempts(value: number) {
   window.sessionStorage.setItem(AUTO_ATTEMPT_STORAGE_KEY, String(value));
 }
 
+// ── Keycloak token persistence (sessionStorage) ─────────────────────────
+// Allows auth state to survive page reloads without a full-page redirect
+// through Keycloak. Tokens are tab-scoped and cleared on tab close.
+const KC_TOKEN_KEY = "__JPP_KC_TOKEN__";
+const KC_REFRESH_TOKEN_KEY = "__JPP_KC_REFRESH_TOKEN__";
+const KC_ID_TOKEN_KEY = "__JPP_KC_ID_TOKEN__";
+
+function saveKeycloakTokens(instance: KeycloakInstance) {
+  if (typeof window === "undefined") return;
+  try {
+    if (instance.token) window.sessionStorage.setItem(KC_TOKEN_KEY, instance.token);
+    if (instance.refreshToken) window.sessionStorage.setItem(KC_REFRESH_TOKEN_KEY, instance.refreshToken);
+    if (instance.idToken) window.sessionStorage.setItem(KC_ID_TOKEN_KEY, instance.idToken);
+    authLog("tokens-saved");
+  } catch { /* ignore quota errors */ }
+}
+
+function loadKeycloakTokens(): { token: string; refreshToken: string; idToken?: string } | null {
+  if (typeof window === "undefined") return null;
+  const token = window.sessionStorage.getItem(KC_TOKEN_KEY);
+  const refreshToken = window.sessionStorage.getItem(KC_REFRESH_TOKEN_KEY);
+  if (!token || !refreshToken) return null;
+  const idToken = window.sessionStorage.getItem(KC_ID_TOKEN_KEY) ?? undefined;
+  return { token, refreshToken, idToken };
+}
+
+function clearKeycloakTokens() {
+  if (typeof window === "undefined") return;
+  window.sessionStorage.removeItem(KC_TOKEN_KEY);
+  window.sessionStorage.removeItem(KC_REFRESH_TOKEN_KEY);
+  window.sessionStorage.removeItem(KC_ID_TOKEN_KEY);
+}
+
 function consumeAuthErrorFromHash(): { code: string; message: string } | null {
   if (typeof window === "undefined") {
     return null;
@@ -414,6 +662,10 @@ function consumeAuthErrorFromHash(): { code: string; message: string } | null {
   const params = new URLSearchParams(hash);
   const error = params.get("error");
   if (!error) {
+    return null;
+  }
+  if (error === "login_required" && DISABLE_AUTH_INIT) {
+    window.history.replaceState(null, document.title, window.location.pathname + window.location.search);
     return null;
   }
   const description = params.get("error_description");
@@ -430,4 +682,33 @@ function describeAuthError(code: string, description?: string | null): string {
     return "Your session expired. Sign in again to continue.";
   }
   return code;
+}
+
+function isKeycloakCrossOrigin(): boolean {
+  if (!keycloakConfig?.url || typeof window === "undefined") {
+    return false;
+  }
+  try {
+    return new URL(keycloakConfig.url).origin !== window.location.origin;
+  } catch {
+    return true;
+  }
+}
+
+function hasAuthCallbackInUrl(): boolean {
+  if (typeof window === "undefined") {
+    return false;
+  }
+  // Check query string (responseMode: "query")
+  const searchParams = new URLSearchParams(window.location.search);
+  if (searchParams.has("code") && searchParams.has("state")) {
+    return true;
+  }
+  // Check hash fragment (Keycloak default response_mode is "fragment")
+  const hash = window.location.hash.startsWith("#") ? window.location.hash.slice(1) : "";
+  if (!hash) {
+    return false;
+  }
+  const hashParams = new URLSearchParams(hash);
+  return hashParams.has("code") && hashParams.has("state");
 }

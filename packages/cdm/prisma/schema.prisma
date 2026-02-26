@@ -1,5 +1,5 @@
 generator client {
-  provider = "prisma-client-js"
+  provider      = "prisma-client-js"
   binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
 }
 
@@ -15,53 +15,58 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  users               User[]
-  credentials         Credential[]
-  jiraUsers           JiraUser[]
-  jiraSites           JiraSite[]
-  jiraProjects        JiraProject[]
-  projectTrackedUsers ProjectTrackedUser[]
-  jiraAssignableUsers JiraAssignableUser[]
-  sprints             Sprint[]
-  issues              Issue[]
-  comments            Comment[]
-  worklogs            Worklog[]
-  userProjectLinks    UserProjectLink[]
-  dailySummaries      DailySummary[]
-  performanceNotes    PerformanceReviewNote[]
-  syncJobs            SyncJob[]
-  syncStates          SyncState[]
-  syncLogs            SyncLog[]
-  tickets             Ticket[]
-  artifacts           Artifact[]
-  issueLinks          IssueLink[]
-  issueInsights       IssueInsight[]
-  issueInsightSnapshots IssueInsightSnapshot[]
-  llmSkillTraces      LlmSkillTrace[]
-  taskSummarySnapshots TaskSummarySnapshot[]
-  userSummarySnapshots UserSummarySnapshot[]
+  users                   User[]
+  credentials             Credential[]
+  jiraUsers               JiraUser[]
+  jiraSites               JiraSite[]
+  jiraProjects            JiraProject[]
+  projectTrackedUsers     ProjectTrackedUser[]
+  jiraAssignableUsers     JiraAssignableUser[]
+  sprints                 Sprint[]
+  issues                  Issue[]
+  comments                Comment[]
+  worklogs                Worklog[]
+  userProjectLinks        UserProjectLink[]
+  dailySummaries          DailySummary[]
+  performanceNotes        PerformanceReviewNote[]
+  syncJobs                SyncJob[]
+  syncStates              SyncState[]
+  syncLogs                SyncLog[]
+  tickets                 Ticket[]
+  artifacts               Artifact[]
+  issueLinks              IssueLink[]
+  issueInsights           IssueInsight[]
+  issueInsightSnapshots   IssueInsightSnapshot[]
+  llmSkillTraces          LlmSkillTrace[]
+  taskSummarySnapshots    TaskSummarySnapshot[]
+  userSummarySnapshots    UserSummarySnapshot[]
   projectSummarySnapshots ProjectSummarySnapshot[]
-  userAvailability    UserAvailability[]
+  userAvailability        UserAvailability[]
   projectSummarySchedules ProjectSummarySchedule[]
+  reportDefinitions       ReportDefinition[]
+  reportVersions          ReportVersion[]
+  reportRuns              ReportRun[]
+  auditLogs               AuditLog[]
 }
 
 model User {
-  id           String            @id @default(uuid())
-  tenantId     String            @default("dev")
-  email        String
-  displayName  String
-  phone        String?
-  createdAt    DateTime          @default(now())
-  updatedAt    DateTime          @updatedAt
-  role         Role              @default(USER)
-  credential   Credential?
-  summaries    DailySummary[]
+  id                   String                  @id @default(uuid())
+  tenantId             String                  @default("dev")
+  email                String
+  displayName          String
+  phone                String?
+  createdAt            DateTime                @default(now())
+  updatedAt            DateTime                @updatedAt
+  role                 Role                    @default(USER)
+  credential           Credential?
+  summaries            DailySummary[]
   taskSummarySnapshots TaskSummarySnapshot[]
   userSummarySnapshots UserSummarySnapshot[]
-  sitesCreated JiraSite[]        @relation("SiteCreator")
-  projectLinks UserProjectLink[]
-  performanceNotes PerformanceReviewNote[] @relation("PerformanceNoteManager")
-  tenant       Tenant            @relation(fields: [tenantId], references: [id])
+  sitesCreated         JiraSite[]              @relation("SiteCreator")
+  projectLinks         UserProjectLink[]
+  performanceNotes     PerformanceReviewNote[] @relation("PerformanceNoteManager")
+  auditLogs            AuditLog[]
+  tenant               Tenant                  @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, email])
   @@index([tenantId])
@@ -101,19 +106,19 @@ model JiraUser {
 }
 
 model JiraSite {
-  id            String        @id @default(uuid())
-  tenantId      String        @default("dev")
-  alias         String
-  baseUrl       String
-  adminEmail    String
-  tokenCipher   String
-  createdById   String?
-  createdAt     DateTime      @default(now())
-  updatedAt     DateTime      @updatedAt
-  projects      JiraProject[]
-  createdBy     User?         @relation("SiteCreator", fields: [createdById], references: [id])
+  id              String               @id @default(uuid())
+  tenantId        String               @default("dev")
+  alias           String
+  baseUrl         String
+  adminEmail      String
+  tokenCipher     String
+  createdById     String?
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+  projects        JiraProject[]
+  createdBy       User?                @relation("SiteCreator", fields: [createdById], references: [id])
   assignableUsers JiraAssignableUser[]
-  tenant        Tenant        @relation(fields: [tenantId], references: [id])
+  tenant          Tenant               @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, alias])
   @@unique([tenantId, baseUrl])
@@ -121,30 +126,30 @@ model JiraSite {
 }
 
 model JiraProject {
-  id             String               @id @default(uuid())
-  tenantId       String               @default("dev")
-  jiraId         String
-  key            String
-  name           String
-  siteId         String
-  isActive       Boolean              @default(true)
-  createdAt      DateTime             @default(now())
-  updatedAt      DateTime             @updatedAt
-  summaries      DailySummary[]
-  taskSummarySnapshots TaskSummarySnapshot[]
-  userSummarySnapshots UserSummarySnapshot[]
+  id                      String                   @id @default(uuid())
+  tenantId                String                   @default("dev")
+  jiraId                  String
+  key                     String
+  name                    String
+  siteId                  String
+  isActive                Boolean                  @default(true)
+  createdAt               DateTime                 @default(now())
+  updatedAt               DateTime                 @updatedAt
+  summaries               DailySummary[]
+  taskSummarySnapshots    TaskSummarySnapshot[]
+  userSummarySnapshots    UserSummarySnapshot[]
   projectSummarySnapshots ProjectSummarySnapshot[]
-  issues         Issue[]
-  site           JiraSite             @relation(fields: [siteId], references: [id])
-  trackedUsers   ProjectTrackedUser[]
-  syncJob        SyncJob?
-  syncLogs       SyncLog[]
-  syncStates     SyncState[]
-  accountLinks   UserProjectLink[]
-  performanceNotes PerformanceReviewNote[]
-  availability   UserAvailability[] @relation("ProjectAvailability")
-  summarySchedule ProjectSummarySchedule?
-  tenant         Tenant              @relation(fields: [tenantId], references: [id])
+  issues                  Issue[]
+  site                    JiraSite                 @relation(fields: [siteId], references: [id])
+  trackedUsers            ProjectTrackedUser[]
+  syncJob                 SyncJob?
+  syncLogs                SyncLog[]
+  syncStates              SyncState[]
+  accountLinks            UserProjectLink[]
+  performanceNotes        PerformanceReviewNote[]
+  availability            UserAvailability[]       @relation("ProjectAvailability")
+  summarySchedule         ProjectSummarySchedule?
+  tenant                  Tenant                   @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, siteId, jiraId])
   @@unique([tenantId, siteId, key])
@@ -152,19 +157,19 @@ model JiraProject {
 }
 
 model ProjectSummarySchedule {
-  id               String   @id @default(uuid())
-  tenantId         String   @default("dev")
-  projectId        String   @unique
-  frequencyMinutes Int      @default(180)
-  enabled          Boolean  @default(true)
+  id               String      @id @default(uuid())
+  tenantId         String      @default("dev")
+  projectId        String      @unique
+  frequencyMinutes Int         @default(180)
+  enabled          Boolean     @default(true)
   nextRunAt        DateTime?
   lastRunAt        DateTime?
   lockedUntil      DateTime?
   lastError        String?
   lastErrorAt      DateTime?
-  createdAt        DateTime @default(now())
-  updatedAt        DateTime @updatedAt
-  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt        DateTime    @default(now())
+  updatedAt        DateTime    @updatedAt
+  tenant           Tenant      @relation(fields: [tenantId], references: [id])
   project          JiraProject @relation(fields: [projectId], references: [id])
 
   @@unique([tenantId, projectId])
@@ -172,19 +177,19 @@ model ProjectSummarySchedule {
 }
 
 model ProjectTrackedUser {
-  id            String      @id @default(uuid())
-  tenantId      String      @default("dev")
-  projectId     String
-  jiraAccountId String
-  displayName   String
-  email         String?
-  avatarUrl     String?
-  isTracked     Boolean     @default(true)
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  project       JiraProject @relation(fields: [projectId], references: [id])
+  id               String                  @id @default(uuid())
+  tenantId         String                  @default("dev")
+  projectId        String
+  jiraAccountId    String
+  displayName      String
+  email            String?
+  avatarUrl        String?
+  isTracked        Boolean                 @default(true)
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+  project          JiraProject             @relation(fields: [projectId], references: [id])
   performanceNotes PerformanceReviewNote[]
-  tenant        Tenant      @relation(fields: [tenantId], references: [id])
+  tenant           Tenant                  @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, projectId, jiraAccountId])
   @@index([tenantId])
@@ -210,18 +215,18 @@ model JiraAssignableUser {
 }
 
 model UserAvailability {
-  id            String   @id @default(uuid())
-  tenantId      String   @default("dev")
+  id            String       @id @default(uuid())
+  tenantId      String       @default("dev")
   projectId     String?
   jiraAccountId String
   startDate     DateTime
   endDate       DateTime
-  type          String   @default("leave")
-  source        String   @default("manual")
+  type          String       @default("leave")
+  source        String       @default("manual")
   reason        String?
-  createdAt     DateTime @default(now())
-  updatedAt     DateTime @updatedAt
-  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt     DateTime     @default(now())
+  updatedAt     DateTime     @updatedAt
+  tenant        Tenant       @relation(fields: [tenantId], references: [id])
   project       JiraProject? @relation("ProjectAvailability", fields: [projectId], references: [id])
 
   @@index([tenantId, jiraAccountId, startDate, endDate])
@@ -246,49 +251,49 @@ model Sprint {
 }
 
 model Issue {
-  id            String      @id @default(uuid())
-  tenantId      String      @default("dev")
-  jiraId        String
-  key           String
-  summary       String?
-  status        String
-  assigneeId    String?
-  createdAt     DateTime    @default(now())
-  updatedAt     DateTime    @updatedAt
-  jiraCreatedAt DateTime
-  jiraUpdatedAt DateTime
-  priority      String?
-  projectId     String
-  remoteData    Json?
-  sprintId      String?
-  dueDate       DateTime?
-  assigneeChangedAt DateTime?
-  resolvedAt    DateTime?
-  startedAt     DateTime?
-  statusCategory String?
-  browseUrl     String?
-  reporterId    String?
-  parentIssueId String?
-  needsInsightRefresh Boolean   @default(false)
+  id                        String                 @id @default(uuid())
+  tenantId                  String                 @default("dev")
+  jiraId                    String
+  key                       String
+  summary                   String?
+  status                    String
+  assigneeId                String?
+  createdAt                 DateTime               @default(now())
+  updatedAt                 DateTime               @updatedAt
+  jiraCreatedAt             DateTime
+  jiraUpdatedAt             DateTime
+  priority                  String?
+  projectId                 String
+  remoteData                Json?
+  sprintId                  String?
+  dueDate                   DateTime?
+  assigneeChangedAt         DateTime?
+  resolvedAt                DateTime?
+  startedAt                 DateTime?
+  statusCategory            String?
+  browseUrl                 String?
+  reporterId                String?
+  parentIssueId             String?
+  needsInsightRefresh       Boolean                @default(false)
   insightRefreshRequestedAt DateTime?
-  insightRefreshAttempts Int   @default(0)
+  insightRefreshAttempts    Int                    @default(0)
   insightRefreshLockedUntil DateTime?
-  insightRefreshedAt DateTime?
-  lastInsightError String?
-  comments      Comment[]
-  assignee      JiraUser?   @relation("IssueAssignee", fields: [assigneeId], references: [id])
-  reporter      JiraUser?   @relation("IssueReporter", fields: [reporterId], references: [id])
-  parent        Issue?      @relation("IssueParent", fields: [parentIssueId], references: [id])
-  children      Issue[]     @relation("IssueParent")
-  linksOut      IssueLink[] @relation("IssueLinkSource")
-  linksIn       IssueLink[] @relation("IssueLinkTarget")
-  project       JiraProject @relation(fields: [projectId], references: [id])
-  sprint        Sprint?     @relation(fields: [sprintId], references: [id])
-  worklogs      Worklog[]
-  insight       IssueInsight?
-  insightSnapshots IssueInsightSnapshot[]
-  taskSummarySnapshots TaskSummarySnapshot[]
-  tenant        Tenant      @relation(fields: [tenantId], references: [id])
+  insightRefreshedAt        DateTime?
+  lastInsightError          String?
+  comments                  Comment[]
+  assignee                  JiraUser?              @relation("IssueAssignee", fields: [assigneeId], references: [id])
+  reporter                  JiraUser?              @relation("IssueReporter", fields: [reporterId], references: [id])
+  parent                    Issue?                 @relation("IssueParent", fields: [parentIssueId], references: [id])
+  children                  Issue[]                @relation("IssueParent")
+  linksOut                  IssueLink[]            @relation("IssueLinkSource")
+  linksIn                   IssueLink[]            @relation("IssueLinkTarget")
+  project                   JiraProject            @relation(fields: [projectId], references: [id])
+  sprint                    Sprint?                @relation(fields: [sprintId], references: [id])
+  worklogs                  Worklog[]
+  insight                   IssueInsight?
+  insightSnapshots          IssueInsightSnapshot[]
+  taskSummarySnapshots      TaskSummarySnapshot[]
+  tenant                    Tenant                 @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, jiraId])
   @@unique([tenantId, key])
@@ -298,7 +303,6 @@ model Issue {
   @@index([tenantId, dueDate])
   @@index([tenantId, needsInsightRefresh, insightRefreshLockedUntil])
 }
-
 
 model IssueLink {
   id            String   @id @default(uuid())
@@ -319,29 +323,29 @@ model IssueLink {
 }
 
 model IssueInsight {
-  id              String   @id @default(uuid())
-  tenantId        String   @default("dev")
-  issueId         String   @unique
+  id               String                @id @default(uuid())
+  tenantId         String                @default("dev")
+  issueId          String                @unique
   latestSnapshotId String?
-  summary         Json?
-  sentiments      Json?
-  escalationScore Float?
-  signals         Json?
+  summary          Json?
+  sentiments       Json?
+  escalationScore  Float?
+  signals          Json?
   providerMetadata Json?
-  lastIssueHash   String
-  metadata        Json?
-  computedAt      DateTime @default(now())
-  expiresAt       DateTime?
-  issue           Issue    @relation(fields: [issueId], references: [id])
-  latestSnapshot  IssueInsightSnapshot? @relation("IssueInsightLatest", fields: [latestSnapshotId], references: [id])
-  tenant          Tenant   @relation(fields: [tenantId], references: [id])
+  lastIssueHash    String
+  metadata         Json?
+  computedAt       DateTime              @default(now())
+  expiresAt        DateTime?
+  issue            Issue                 @relation(fields: [issueId], references: [id])
+  latestSnapshot   IssueInsightSnapshot? @relation("IssueInsightLatest", fields: [latestSnapshotId], references: [id])
+  tenant           Tenant                @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, computedAt])
 }
 
 model IssueInsightSnapshot {
-  id               String   @id @default(uuid())
-  tenantId         String   @default("dev")
+  id               String         @id @default(uuid())
+  tenantId         String         @default("dev")
   issueId          String
   provider         String
   inputsHash       String
@@ -355,9 +359,9 @@ model IssueInsightSnapshot {
   worklogCursor    String?
   statusStage      String?
   stageBreakdown   Json?
-  createdAt        DateTime @default(now())
-  issue            Issue    @relation(fields: [issueId], references: [id])
-  tenant           Tenant   @relation(fields: [tenantId], references: [id])
+  createdAt        DateTime       @default(now())
+  issue            Issue          @relation(fields: [issueId], references: [id])
+  tenant           Tenant         @relation(fields: [tenantId], references: [id])
   insights         IssueInsight[] @relation("IssueInsightLatest")
 
   @@index([tenantId, issueId, createdAt])
@@ -390,19 +394,19 @@ model LlmSkillTrace {
 }
 
 model Comment {
-  id            String   @id @default(uuid())
-  tenantId      String   @default("dev")
+  id            String    @id @default(uuid())
+  tenantId      String    @default("dev")
   jiraId        String
   issueId       String
   body          String
-  createdAt     DateTime @default(now())
+  createdAt     DateTime  @default(now())
   authorId      String
   jiraCreatedAt DateTime
   jiraUpdatedAt DateTime?
-  updatedAt     DateTime @updatedAt
-  author        JiraUser @relation("CommentAuthor", fields: [authorId], references: [id])
-  issue         Issue    @relation(fields: [issueId], references: [id])
-  tenant        Tenant   @relation(fields: [tenantId], references: [id])
+  updatedAt     DateTime  @updatedAt
+  author        JiraUser  @relation("CommentAuthor", fields: [authorId], references: [id])
+  issue         Issue     @relation(fields: [issueId], references: [id])
+  tenant        Tenant    @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, jiraId])
   @@index([tenantId, issueId])
@@ -464,19 +468,19 @@ model DailySummary {
 }
 
 model TaskSummarySnapshot {
-  id          String   @id @default(uuid())
-  tenantId    String   @default("dev")
+  id          String      @id @default(uuid())
+  tenantId    String      @default("dev")
   projectId   String
   issueId     String
   userId      String?
   summaryDate DateTime
   runId       String
   payload     Json
-  createdAt   DateTime @default(now())
+  createdAt   DateTime    @default(now())
   project     JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  issue       Issue    @relation(fields: [issueId], references: [id])
-  user        User?    @relation(fields: [userId], references: [id])
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  issue       Issue       @relation(fields: [issueId], references: [id])
+  user        User?       @relation(fields: [userId], references: [id])
+  tenant      Tenant      @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, projectId, summaryDate])
   @@index([tenantId, issueId, summaryDate])
@@ -484,94 +488,94 @@ model TaskSummarySnapshot {
 }
 
 model UserSummarySnapshot {
-  id             String   @id @default(uuid())
-  tenantId       String   @default("dev")
-  projectId      String
-  userId         String?
-  summaryDate    DateTime
-  runId          String
-  taskSummaryIds String[]
-  payload        Json
-  narrative           String?  @db.Text
-  narrativeHash       String?
-  narrativeGeneratedAt DateTime?
-  richNarratives      Json?
-  needsNarrativeRefresh Boolean @default(true)
+  id                          String      @id @default(uuid())
+  tenantId                    String      @default("dev")
+  projectId                   String
+  userId                      String?
+  summaryDate                 DateTime
+  runId                       String
+  taskSummaryIds              String[]
+  payload                     Json
+  narrative                   String?     @db.Text
+  narrativeHash               String?
+  narrativeGeneratedAt        DateTime?
+  richNarratives              Json?
+  needsNarrativeRefresh       Boolean     @default(true)
   narrativeRefreshRequestedAt DateTime?
   narrativeRefreshLockedUntil DateTime?
-  narrativeRefreshAttempts Int @default(0)
-  lastNarrativeError   String?
-  createdAt      DateTime @default(now())
-  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  user           User?       @relation(fields: [userId], references: [id])
-  tenant         Tenant      @relation(fields: [tenantId], references: [id])
+  narrativeRefreshAttempts    Int         @default(0)
+  lastNarrativeError          String?
+  createdAt                   DateTime    @default(now())
+  project                     JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user                        User?       @relation(fields: [userId], references: [id])
+  tenant                      Tenant      @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, projectId, summaryDate])
   @@index([tenantId, projectId, runId])
 }
 
 model ProjectSummarySnapshot {
-  id             String   @id @default(uuid())
-  tenantId       String   @default("dev")
-  projectId      String
-  summaryDate    DateTime
-  runId          String
-  userSummaryIds String[]
-  payload        Json
-  narrative           String?  @db.Text
-  narrativeHash       String?
-  narrativeGeneratedAt DateTime?
-  richNarratives      Json?
-  needsNarrativeRefresh Boolean @default(true)
+  id                          String      @id @default(uuid())
+  tenantId                    String      @default("dev")
+  projectId                   String
+  summaryDate                 DateTime
+  runId                       String
+  userSummaryIds              String[]
+  payload                     Json
+  narrative                   String?     @db.Text
+  narrativeHash               String?
+  narrativeGeneratedAt        DateTime?
+  richNarratives              Json?
+  needsNarrativeRefresh       Boolean     @default(true)
   narrativeRefreshRequestedAt DateTime?
   narrativeRefreshLockedUntil DateTime?
-  narrativeRefreshAttempts Int @default(0)
-  lastNarrativeError   String?
-  createdAt      DateTime @default(now())
-  project        JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
-  tenant         Tenant      @relation(fields: [tenantId], references: [id])
+  narrativeRefreshAttempts    Int         @default(0)
+  lastNarrativeError          String?
+  createdAt                   DateTime    @default(now())
+  project                     JiraProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  tenant                      Tenant      @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, projectId, runId])
   @@index([tenantId, projectId, summaryDate])
 }
 
 model PerformanceReviewNote {
-  id             String             @id @default(uuid())
-  tenantId       String             @default("dev")
-  projectId      String
-  trackedUserId  String
-  managerId      String
-  startDate      DateTime
-  endDate        DateTime
-  markdown       String
-  createdAt      DateTime           @default(now())
-  updatedAt      DateTime           @updatedAt
-  project        JiraProject        @relation(fields: [projectId], references: [id])
-  trackedUser    ProjectTrackedUser @relation(fields: [trackedUserId], references: [id])
-  manager        User               @relation("PerformanceNoteManager", fields: [managerId], references: [id])
-  tenant         Tenant             @relation(fields: [tenantId], references: [id])
+  id            String             @id @default(uuid())
+  tenantId      String             @default("dev")
+  projectId     String
+  trackedUserId String
+  managerId     String
+  startDate     DateTime
+  endDate       DateTime
+  markdown      String
+  createdAt     DateTime           @default(now())
+  updatedAt     DateTime           @updatedAt
+  project       JiraProject        @relation(fields: [projectId], references: [id])
+  trackedUser   ProjectTrackedUser @relation(fields: [trackedUserId], references: [id])
+  manager       User               @relation("PerformanceNoteManager", fields: [managerId], references: [id])
+  tenant        Tenant             @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, projectId, trackedUserId, managerId, startDate, endDate])
   @@index([tenantId, projectId])
 }
 
 model SyncJob {
-  id           String        @id @default(uuid())
-  tenantId     String        @default("dev")
-  projectId    String        @unique
-  workflowId   String
-  scheduleId   String
-  cronSchedule String
-  backoffLevel Int           @default(0)
-  backoffOriginalCron String?
+  id                    String        @id @default(uuid())
+  tenantId              String        @default("dev")
+  projectId             String        @unique
+  workflowId            String
+  scheduleId            String
+  cronSchedule          String
+  backoffLevel          Int           @default(0)
+  backoffOriginalCron   String?
   backoffLastNotifiedAt DateTime?
-  status       SyncJobStatus @default(ACTIVE)
-  lastRunAt    DateTime?
-  nextRunAt    DateTime?
-  createdAt    DateTime      @default(now())
-  updatedAt    DateTime      @updatedAt
-  project      JiraProject   @relation(fields: [projectId], references: [id])
-  tenant       Tenant        @relation(fields: [tenantId], references: [id])
+  status                SyncJobStatus @default(ACTIVE)
+  lastRunAt             DateTime?
+  nextRunAt             DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+  project               JiraProject   @relation(fields: [projectId], references: [id])
+  tenant                Tenant        @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, workflowId])
   @@unique([tenantId, scheduleId])
@@ -609,9 +613,71 @@ model SyncLog {
   @@index([tenantId, projectId])
 }
 
+model ReportDefinition {
+  id               String          @id @default(uuid())
+  tenantId         String          @default("dev")
+  slug             String
+  name             String
+  description      String?
+  type             String          @default("QUERY")
+  personaTags      String[]
+  currentVersionId String?
+  createdAt        DateTime        @default(now())
+  updatedAt        DateTime        @updatedAt
+  versions         ReportVersion[]
+  runs             ReportRun[]
+  tenant           Tenant          @relation(fields: [tenantId], references: [id])
+
+  @@unique([tenantId, slug])
+  @@index([tenantId])
+}
+
+model ReportVersion {
+  id             String           @id @default(uuid())
+  tenantId       String           @default("dev")
+  definitionId   String
+  status         String           @default("DRAFT")
+  queryTemplate  String?          @db.Text
+  defaultFilters Json?
+  notes          String?
+  createdBy      String?
+  publishedAt    DateTime?
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+  definition     ReportDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  runs           ReportRun[]
+  tenant         Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, definitionId])
+  @@index([tenantId, status])
+}
+
+model ReportRun {
+  id              String           @id @default(uuid())
+  tenantId        String           @default("dev")
+  definitionId    String
+  reportVersionId String
+  executedBy      String?
+  executedAt      DateTime         @default(now())
+  durationMs      Int              @default(0)
+  status          String           @default("COMPLETED")
+  cacheHit        Boolean          @default(false)
+  filterHash      String?
+  filtersUsed     Json?
+  payload         Json?
+  error           String?
+  createdAt       DateTime         @default(now())
+  definition      ReportDefinition @relation(fields: [definitionId], references: [id], onDelete: Cascade)
+  version         ReportVersion    @relation(fields: [reportVersionId], references: [id], onDelete: Cascade)
+  tenant          Tenant           @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, definitionId])
+  @@index([tenantId, reportVersionId, executedAt])
+}
+
 model Ticket {
-  id          String   @id
-  tenantId    String   @default("dev")
+  id          String     @id
+  tenantId    String     @default("dev")
   source      String
   externalKey String
   project     String?
@@ -622,18 +688,18 @@ model Ticket {
   labels      String[]
   assignee    String?
   parentId    String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt   DateTime   @default(now())
+  updatedAt   DateTime   @updatedAt
   artifacts   Artifact[]
-  tenant      Tenant   @relation(fields: [tenantId], references: [id])
+  tenant      Tenant     @relation(fields: [tenantId], references: [id])
 
   @@unique([tenantId, externalKey])
   @@index([tenantId, status])
 }
 
 model Artifact {
-  id        BigInt    @id @default(autoincrement())
-  tenantId  String    @default("dev")
+  id        BigInt   @id @default(autoincrement())
+  tenantId  String   @default("dev")
   ticketId  String
   name      String
   kind      String
@@ -641,9 +707,9 @@ model Artifact {
   size      Int
   sha256    String?
   uri       String
-  createdAt DateTime  @default(now())
-  ticket    Ticket    @relation(fields: [ticketId], references: [id])
-  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  createdAt DateTime @default(now())
+  ticket    Ticket   @relation(fields: [ticketId], references: [id])
+  tenant    Tenant   @relation(fields: [tenantId], references: [id])
 
   @@index([tenantId, ticketId])
 }
@@ -652,6 +718,23 @@ enum Role {
   ADMIN
   MANAGER
   USER
+}
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  userId     String
+  action     String
+  entityType String
+  entityId   String
+  changes    Json
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+  user   User   @relation(fields: [userId], references: [id])
+
+  @@index([tenantId])
+  @@index([entityType, entityId])
 }
 
 enum CredentialType {

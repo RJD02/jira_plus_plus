@@ -737,6 +737,13 @@ export const typeDefs = gql`
     apiToken: String!
   }
 
+  input UpdateJiraSiteInput {
+    id: ID!
+    alias: String
+    adminEmail: String
+    apiToken: String
+  }
+
   input RegisterJiraProjectInput {
     siteId: ID!
     jiraId: String!
@@ -790,16 +797,21 @@ export const typeDefs = gql`
   type ReportingVersion {
     id: ID!
     status: String!
+    notes: String
     publishedAt: DateTime
+    createdAt: DateTime
   }
 
   type ReportingDefinition {
     id: ID!
     slug: String!
     name: String!
+    description: String
     type: String!
     personaTags: [String!]!
     currentVersion: ReportingVersion
+    versions: [ReportingVersion!]
+    runs: [ReportingRun!]
   }
 
   type ReportingRun {
@@ -809,6 +821,7 @@ export const typeDefs = gql`
     executedAt: DateTime!
     durationMs: Int!
     cacheHit: Boolean!
+    payload: JSON
     workflowId: String
     temporalRunId: String
     error: String
@@ -842,6 +855,7 @@ export const typeDefs = gql`
     userAvailability(accountId: String, from: Date, to: Date): [UserAvailability!]!
     reportingDefinitions: [ReportingDefinition!]!
     reportingRuns(filter: ReportingRunFilterInput): [ReportingRun!]!
+    reportDefinition(id: ID!): ReportingDefinition
   }
 
   type JiraProjectOption {
@@ -885,6 +899,9 @@ export const typeDefs = gql`
     resetUserPassword(input: ResetUserPasswordInput!): Boolean!
     updateUserRole(input: UpdateUserRoleInput!): User!
     registerJiraSite(input: RegisterJiraSiteInput!): JiraSite!
+    updateJiraSite(input: UpdateJiraSiteInput!): JiraSite!
+    deleteJiraSite(id: ID!): Boolean!
+    testJiraConnection(siteId: ID!, email: String!, apiToken: String!): Boolean!
     registerJiraProject(input: RegisterJiraProjectInput!): JiraProject!
     mapUserToProject(input: MapUserInput!): UserProjectLink!
     unlinkUserFromProject(linkId: ID!): Boolean!

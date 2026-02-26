@@ -9,8 +9,8 @@ const apiRoot = path.resolve(dirname, "..");
 const repoRoot = path.resolve(apiRoot, "..", "..");
 
 const candidateEnvPaths = [
-  path.join(repoRoot, ".env"),
   path.join(apiRoot, ".env"),
+  path.join(repoRoot, ".env"),
 ];
 
 for (const envPath of candidateEnvPaths) {
@@ -21,6 +21,7 @@ for (const envPath of candidateEnvPaths) {
 
 const envSchema = z.object({
   PORT: z.coerce.number().default(4000),
+  API_HOST: z.string().default("0.0.0.0"),
   WORKER_PORT: z.coerce.number().default(4001),
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   TENANT_ID: z.string().default("dev"),
@@ -60,8 +61,15 @@ const envSchema = z.object({
     .union([z.literal("true"), z.literal("false")])
     .optional(),
   SMTP_FROM_EMAIL: z.string().email().optional(),
+  EMAIL_PROVIDER: z.enum(["smtp", "resend"]).default("smtp"),
+  RESEND_API_KEY: z.string().optional(),
+  RESEND_FROM_EMAIL: z.string().email().optional(),
+  APP_URL: z.string().url().optional(),
   REPORTING_API_ENDPOINT: z.string().optional(),
   REPORTING_API_TENANT_ID: z.string().optional(),
+  KEYCLOAK_BASE_URL: z.string().optional(),
+  KEYCLOAK_REALM: z.string().default("nucleus"),
+  KEYCLOAK_CLIENT_ID: z.string().default("jira-plus-plus"),
 });
 
 type EnvShape = z.infer<typeof envSchema>;

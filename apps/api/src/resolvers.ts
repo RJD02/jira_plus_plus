@@ -13,6 +13,7 @@ import {
   verifyPassword,
 } from "./auth.js";
 import { fetchJiraProjectOptions, fetchJiraProjectUsers } from "./jira-client.js";
+import { getTemporalClient } from "./temporal/client.js";
 import {
   sendPasswordResetEmail,
   sendUserInviteEmail,
@@ -53,7 +54,6 @@ import {
   updateProjectSummarySchedule as updateProjectSummaryScheduleService,
   recordProjectSummaryRunSuccess,
 } from "./services/projectSummaryAutomationService.js";
-import { getReportingRegistryClient } from "./services/reportingRegistryService.js";
 
 function requireUser(ctx: RequestContext) {
   if (!ctx.user) {
@@ -69,6 +69,17 @@ function requireAdmin(ctx: RequestContext) {
   const user = requireUser(ctx);
   if (user.role !== "ADMIN") {
     throw new GraphQLError("Admin privileges required", {
+      extensions: { code: "FORBIDDEN" },
+    });
+  }
+
+  return user;
+}
+
+function requireAdminOrManager(ctx: RequestContext) {
+  const user = requireUser(ctx);
+  if (user.role !== "ADMIN" && user.role !== "MANAGER") {
+    throw new GraphQLError("Admin or Manager privileges required", {
       extensions: { code: "FORBIDDEN" },
     });
   }
@@ -153,7 +164,7 @@ export const resolvers = {
       );
     },
     jiraSites: async (_parent: unknown, _args: unknown, ctx: RequestContext) => {
-      requireAdmin(ctx);
+      requireAdminOrManager(ctx);
       return runAsTenant(ctx, (prisma) =>
         prisma.jiraSite.findMany({
           include: { projects: true },
@@ -258,56 +269,100 @@ export const resolvers = {
       );
     },
     reportingDefinitions: async (_parent: unknown, _args: unknown, ctx: RequestContext) => {
-      requireAdmin(ctx);
-      const client = getReportingRegistryClient();
-      if (!client) {
-        throw new GraphQLError("Reporting API is not configured", {
-          extensions: { code: "SERVICE_UNAVAILABLE" },
-        });
-      }
-      try {
-        const definitions = await client.listReports();
-        return definitions.map((definition) => ({
-          ...definition,
-          personaTags: Array.isArray(definition.personaTags) ? definition.personaTags : [],
-          currentVersion: definition.currentVersion ?? null,
-        }));
-      } catch (error) {
-        throw new GraphQLError("Failed to load reporting definitions", {
-          extensions: { code: "EXTERNAL_SERVICE_ERROR" },
-          originalError: ensureError(error),
-        });
-      }
+      requireAdminOrManager(ctx);
+      const definitions = await ctx.prisma.reportDefinition.findMany({
+        where: { tenantId: ctx.tenantId },
+        include: {
+          versions: {
+            where: { status: "PUBLISHED" },
+            orderBy: { publishedAt: "desc" },
+            take: 1,
+          },
+        },
+        orderBy: { createdAt: "desc" },
+      });
+      return definitions.map((d) => ({
+        id: d.id,
+        slug: d.slug,
+        name: d.name,
+        type: d.type,
+        personaTags: d.personaTags,
+        currentVersion: d.versions[0]
+          ? { id: d.versions[0].id, status: d.versions[0].status, publishedAt: d.versions[0].publishedAt }
+          : null,
+      }));
     },
     reportingRuns: async (
       _parent: unknown,
       args: { filter?: { status?: string | null; reportVersionId?: string | null } | null },
       ctx: RequestContext,
     ) => {
-      requireAdmin(ctx);
-      const client = getReportingRegistryClient();
-      if (!client) {
-        throw new GraphQLError("Reporting API is not configured", {
-          extensions: { code: "SERVICE_UNAVAILABLE" },
-        });
+      requireAdminOrManager(ctx);
+      const where: Record<string, unknown> = { tenantId: ctx.tenantId };
+      if (args.filter?.status) where.status = args.filter.status;
+      if (args.filter?.reportVersionId) where.reportVersionId = args.filter.reportVersionId;
+      const runs = await ctx.prisma.reportRun.findMany({
+        where,
+        orderBy: { executedAt: "desc" },
+        take: 100,
+      });
+      return runs.map((r) => ({
+        id: r.id,
+        reportVersionId: r.reportVersionId,
+        status: r.status,
+        executedAt: r.executedAt,
+        durationMs: r.durationMs,
+        cacheHit: r.cacheHit,
+        error: r.error ?? null,
+        workflowId: null,
+        temporalRunId: null,
+      }));
+    },
+    reportDefinition: async (
+      _parent: unknown,
+      args: { id: string },
+      ctx: RequestContext,
+    ) => {
+      requireAdminOrManager(ctx);
+      const def = await ctx.prisma.reportDefinition.findFirst({
+        where: { id: args.id, tenantId: ctx.tenantId },
+        include: {
+          versions: { orderBy: { createdAt: "desc" } },
+          runs: {
+            orderBy: { executedAt: "desc" },
+            take: 10,
+            include: { version: true },
+          },
+        },
+      });
+      if (!def) {
+        throw new GraphQLError("Report not found", { extensions: { code: "NOT_FOUND" } });
       }
-      try {
-        const runs = await client.listRuns({
-          status: args.filter?.status ?? undefined,
-          reportVersionId: args.filter?.reportVersionId ?? undefined,
-        });
-        return runs.map((run) => ({
-          ...run,
-          error: run.error ?? null,
-          workflowId: run.workflowId ?? null,
-          temporalRunId: run.temporalRunId ?? null,
-        }));
-      } catch (error) {
-        throw new GraphQLError("Failed to load reporting runs", {
-          extensions: { code: "EXTERNAL_SERVICE_ERROR" },
-          originalError: ensureError(error),
-        });
-      }
+      return {
+        id: def.id,
+        slug: def.slug,
+        name: def.name,
+        description: def.description,
+        type: def.type,
+        personaTags: def.personaTags,
+        versions: def.versions.map((v) => ({
+          id: v.id,
+          status: v.status,
+          notes: v.notes,
+          publishedAt: v.publishedAt,
+          createdAt: v.createdAt,
+        })),
+        runs: def.runs.map((r) => ({
+          id: r.id,
+          reportVersionId: r.reportVersionId,
+          status: r.status,
+          executedAt: r.executedAt,
+          durationMs: r.durationMs,
+          cacheHit: r.cacheHit,
+          payload: r.payload,
+          error: r.error,
+        })),
+      };
     },
     issueInsights: async (
       _parent: unknown,
@@ -717,27 +772,25 @@ export const resolvers = {
         const temporaryPassword = generateTemporaryPassword();
         const passwordHash = await hashPassword(temporaryPassword);
 
-        await prisma.$transaction(async (tx) => {
-          const credential = await tx.credential.findUnique({
-            where: { userId: user.id },
-          });
-
-          if (credential) {
-            await tx.credential.update({
-              where: { id: credential.id },
-              data: { secretHash: passwordHash },
-            });
-          } else {
-            await tx.credential.create({
-              data: {
-                tenantId: ctx.tenantId,
-                type: CredentialType.LOCAL,
-                secretHash: passwordHash,
-                userId: user.id,
-              },
-            });
-          }
+        const credential = await prisma.credential.findUnique({
+          where: { userId: user.id },
         });
+
+        if (credential) {
+          await prisma.credential.update({
+            where: { id: credential.id },
+            data: { secretHash: passwordHash },
+          });
+        } else {
+          await prisma.credential.create({
+            data: {
+              tenantId: ctx.tenantId,
+              type: CredentialType.LOCAL,
+              secretHash: passwordHash,
+              userId: user.id,
+            },
+          });
+        }
 
         try {
           await sendPasswordResetEmail({
@@ -814,6 +867,249 @@ export const resolvers = {
           include: { projects: true },
         }),
       );
+    },
+    updateJiraSite: async (
+      _parent: unknown,
+      args: { input: { id: string; alias?: string | null; adminEmail?: string | null; apiToken?: string | null } },
+      ctx: RequestContext,
+    ) => {
+      const user = requireAdmin(ctx);
+      const { id: siteId, alias, adminEmail, apiToken } = args.input;
+
+      // Validate inputs
+      if (alias !== undefined && alias !== null) {
+        const trimmed = alias.trim();
+        if (trimmed.length < 2 || trimmed.length > 80) {
+          throw new GraphQLError("Alias must be between 2 and 80 characters", {
+            extensions: { code: "BAD_USER_INPUT" },
+          });
+        }
+      }
+      if (adminEmail !== undefined && adminEmail !== null) {
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        if (!emailRegex.test(adminEmail)) {
+          throw new GraphQLError("Invalid email format", {
+            extensions: { code: "BAD_USER_INPUT" },
+          });
+        }
+      }
+      if (apiToken !== undefined && apiToken !== null && apiToken.trim().length === 0) {
+        throw new GraphQLError("API token cannot be empty", {
+          extensions: { code: "BAD_USER_INPUT" },
+        });
+      }
+
+      return runAsTenant(ctx, async (prisma) => {
+        // Verify site exists and belongs to tenant
+        const existing = await prisma.jiraSite.findFirst({
+          where: { id: siteId, tenantId: ctx.tenantId },
+        });
+        if (!existing) {
+          throw new GraphQLError("Jira site not found", {
+            extensions: { code: "NOT_FOUND" },
+          });
+        }
+
+        // Build update data
+        const updateData: Record<string, unknown> = {};
+        const changedFields: string[] = [];
+
+        if (alias !== undefined && alias !== null) {
+          updateData.alias = alias.trim();
+          changedFields.push("alias");
+        }
+        if (adminEmail !== undefined && adminEmail !== null) {
+          updateData.adminEmail = adminEmail;
+          changedFields.push("adminEmail");
+        }
+        if (apiToken !== undefined && apiToken !== null) {
+          updateData.tokenCipher = encryptSecret(apiToken);
+          changedFields.push("apiToken");
+        }
+
+        if (changedFields.length === 0) {
+          throw new GraphQLError("No fields to update", {
+            extensions: { code: "BAD_USER_INPUT" },
+          });
+        }
+
+        // Update site
+        const updated = await prisma.jiraSite.update({
+          where: { id: siteId },
+          data: updateData,
+          include: { projects: true },
+        });
+
+        // Create audit log entry
+        await prisma.auditLog.create({
+          data: {
+            tenantId: ctx.tenantId,
+            userId: user.id,
+            action: "JIRA_SITE_UPDATED",
+            entityType: "JiraSite",
+            entityId: siteId,
+            changes: { fieldsChanged: changedFields },
+          },
+        });
+
+        return updated;
+      });
+    },
+    testJiraConnection: async (
+      _parent: unknown,
+      args: { siteId: string; email: string; apiToken: string },
+      ctx: RequestContext,
+    ) => {
+      requireAdminOrManager(ctx);
+      const { siteId, email, apiToken } = args;
+
+      // Resolve site to get baseUrl
+      const site = await runAsTenant(ctx, (prisma) =>
+        prisma.jiraSite.findFirst({
+          where: { id: siteId, tenantId: ctx.tenantId },
+        }),
+      );
+      if (!site) {
+        throw new GraphQLError("Jira site not found", {
+          extensions: { code: "NOT_FOUND" },
+        });
+      }
+
+      // Test credentials against Jira API
+      const basic = Buffer.from(`${email}:${apiToken}`).toString("base64");
+      const url = `${site.baseUrl.replace(/\/$/, "")}/rest/api/3/myself`;
+      try {
+        const resp = await fetch(url, {
+          method: "GET",
+          headers: {
+            Authorization: `Basic ${basic}`,
+            Accept: "application/json",
+          },
+          signal: AbortSignal.timeout(10_000),
+        });
+        if (!resp.ok) {
+          const body = await resp.text().catch(() => "");
+          throw new GraphQLError(
+            `Jira connection failed (${resp.status}): ${body.slice(0, 200)}`,
+            { extensions: { code: "BAD_USER_INPUT" } },
+          );
+        }
+        return true;
+      } catch (err) {
+        if (err instanceof GraphQLError) throw err;
+        throw new GraphQLError(
+          `Failed to connect to Jira: ${err instanceof Error ? err.message : "Unknown error"}`,
+          { extensions: { code: "BAD_USER_INPUT" } },
+        );
+      }
+    },
+    deleteJiraSite: async (
+      _parent: unknown,
+      args: { id: string },
+      ctx: RequestContext,
+    ) => {
+      requireAdmin(ctx);
+      const { id: siteId } = args;
+      const tenantId = ctx.tenantId;
+
+      await runAsTenant(ctx, async (tx) => {
+        const site = await tx.jiraSite.findUnique({ where: { id: siteId } });
+        if (!site || site.tenantId !== tenantId) {
+          throw new GraphQLError("Jira site not found", {
+            extensions: { code: "NOT_FOUND" },
+          });
+        }
+
+        const projects = await tx.jiraProject.findMany({
+          where: { siteId, tenantId },
+          select: { id: true },
+        });
+        const projectIds = projects.map((p) => p.id);
+
+        // Note: we intentionally do NOT delete platform User records during site
+        // teardown. Email-based matching is unreliable (manually created users can
+        // share emails with Jira assignees) and accidental deletion is irreversible.
+        // Admins can manually remove orphaned users via the Admin Console.
+
+        if (projectIds.length > 0) {
+          const issues = await tx.issue.findMany({
+            where: { projectId: { in: projectIds }, tenantId },
+            select: { id: true },
+          });
+          const issueIds = issues.map((i) => i.id);
+
+          if (issueIds.length > 0) {
+            // Null the self-referential parent FK before deleting issues
+            await tx.issue.updateMany({
+              where: { projectId: { in: projectIds }, tenantId },
+              data: { parentIssueId: null },
+            });
+            // Sever the circular IssueInsight ↔ IssueInsightSnapshot FK
+            await tx.issueInsight.updateMany({
+              where: { issueId: { in: issueIds }, tenantId },
+              data: { latestSnapshotId: null },
+            });
+            await tx.issueInsight.deleteMany({ where: { issueId: { in: issueIds }, tenantId } });
+            await tx.issueInsightSnapshot.deleteMany({ where: { issueId: { in: issueIds }, tenantId } });
+            await tx.issueLink.deleteMany({
+              where: {
+                tenantId,
+                OR: [
+                  { sourceIssueId: { in: issueIds } },
+                  { targetIssueId: { in: issueIds } },
+                ],
+              },
+            });
+            await tx.comment.deleteMany({ where: { issueId: { in: issueIds }, tenantId } });
+            await tx.worklog.deleteMany({ where: { issueId: { in: issueIds }, tenantId } });
+            await tx.taskSummarySnapshot.deleteMany({ where: { issueId: { in: issueIds }, tenantId } });
+          }
+
+          await tx.performanceReviewNote.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.projectTrackedUser.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+
+          // Tear down Temporal schedules before deleting sync job rows, otherwise
+          // orphaned schedules keep firing against deleted projects.
+          const syncJobs = await tx.syncJob.findMany({
+            where: { projectId: { in: projectIds }, tenantId },
+            select: { id: true, scheduleId: true },
+          });
+          if (syncJobs.length > 0) {
+            try {
+              const temporalClient = await getTemporalClient();
+              await Promise.allSettled(
+                syncJobs.map(async (job) => {
+                  try {
+                    const handle = temporalClient.schedule.getHandle(job.scheduleId);
+                    await handle.delete();
+                  } catch {
+                    // Schedule may already be gone — safe to ignore
+                  }
+                }),
+              );
+            } catch {
+              // Temporal unavailable — proceed with DB cleanup regardless
+            }
+          }
+          await tx.syncJob.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.syncLog.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.syncState.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.userProjectLink.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.userAvailability.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.projectSummarySchedule.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.dailySummary.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.userSummarySnapshot.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.projectSummarySnapshot.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.issue.deleteMany({ where: { projectId: { in: projectIds }, tenantId } });
+          await tx.jiraProject.deleteMany({ where: { id: { in: projectIds }, tenantId } });
+        }
+
+        await tx.jiraAssignableUser.deleteMany({ where: { siteId, tenantId } });
+
+        await tx.jiraSite.delete({ where: { id: siteId } });
+      });
+
+      return true;
     },
     registerJiraProject: async (
       _parent: unknown,

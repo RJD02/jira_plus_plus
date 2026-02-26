@@ -5,6 +5,7 @@ import type {
   CommunicationPayload,
 } from "./types.js";
 import { EmailChannel } from "./channels/emailChannel.js";
+import { ResendChannel } from "./channels/resendChannel.js";
 import { WhatsAppChannel } from "./channels/whatsappChannel.js";
 
 type ChannelRegistry = Record<CommunicationChannelName, (payload: CommunicationPayload) => Promise<void>>;
@@ -22,7 +23,8 @@ function resolveRecipients(raw: string | undefined, fallback: string[] = []): st
 }
 
 function bootstrapRegistry(): ChannelRegistry {
-  const emailChannel = new EmailChannel();
+  const env = getEnv();
+  const emailChannel = env.EMAIL_PROVIDER === "resend" ? new ResendChannel() : new EmailChannel();
   const whatsappChannel = new WhatsAppChannel();
 
   return {

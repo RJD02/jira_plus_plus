@@ -6,6 +6,7 @@ import { ScrumPage } from "./pages/ScrumPage";
 import { FocusPage } from "./pages/FocusPage";
 import { ManagerPage } from "./pages/ManagerPage";
 import { AdminConsolePage } from "./pages/AdminConsole";
+import { ReportsPage } from "./pages/ReportsPage";
 import { ApolloProvider } from "./providers/ApolloProvider";
 import { AuthProvider, useAuth } from "./providers/AuthProvider";
 import { ThemeToggle } from "./components/ui/theme-toggle";
@@ -36,6 +37,7 @@ function Shell() {
 
     if (user.role === "MANAGER" || user.role === "ADMIN") {
       items.push({ to: "/manager", label: "Manager Summary" });
+      items.push({ to: "/reports", label: "Reports" });
     }
 
     if (user.role === "ADMIN") {
@@ -114,6 +116,14 @@ function Shell() {
             }
           />
           <Route
+            path="/reports"
+            element={
+              <RequireRole allowedRoles={["ADMIN", "MANAGER"]}>
+                <ReportsPage />
+              </RequireRole>
+            }
+          />
+          <Route
             path="/admin"
             element={
               <RequireRole allowedRoles={["ADMIN"]}>
@@ -147,7 +157,9 @@ function RequireRole({ children, allowedRoles }: { children: JSX.Element; allowe
   const location = useLocation();
   const route = location.pathname;
   const needsRoleCheck = Boolean(allowedRoles?.length);
+  const autoLoginEnabled = import.meta.env.VITE_AUTO_LOGIN_ENABLED !== "false";
   const shouldAuto =
+    autoLoginEnabled &&
     auth.hasKeycloak &&
     auth.phase === "anonymous" &&
     auth.autoAttempts < auth.maxAutoAttempts &&
@@ -265,7 +277,7 @@ function useAutoLoginGuard({
   phase: string;
   autoAttempts: number;
   maxAutoAttempts: number;
-  login: () => Promise<void>;
+  login: (options?: { prompt?: "login" | "none" }) => Promise<void>;
   registerAutoAttempt: () => void;
 }) {
   const suppressedRef = useRef(false);
@@ -288,9 +300,14 @@ function useAutoLoginGuard({
     }
     const attemptNumber = autoAttempts + 1;
     registerAutoAttempt();
+    // First attempt: prompt=none silently checks for an existing Keycloak session.
+    // If a session exists → returns auth code immediately (seamless re-auth).
+    // If not → returns login_required, and the next attempt uses prompt=login
+    // to show the Keycloak login form directly.
+    const prompt = attemptNumber <= 1 ? "none" : "login";
     // eslint-disable-next-line no-console
-    console.info("[AuthLoop] auto login attempt", { attempt: attemptNumber, route });
-    login().catch((error) => {
+    console.info("[AuthLoop] auto login attempt", { attempt: attemptNumber, route, prompt });
+    login({ prompt }).catch((error) => {
       // eslint-disable-next-line no-console
       console.error("[AuthLoop] auto login failed", error);
     });

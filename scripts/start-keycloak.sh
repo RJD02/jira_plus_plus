@@ -14,7 +14,7 @@ if [[ ! -f "$COMPOSE_FILE" ]]; then
   exit 1
 fi
 DOCKER_BUILDKIT=1 docker compose -f "$COMPOSE_FILE" up -d
-URL="${KEYCLOAK_BASE_URL:-http://localhost:8081}/realms/master/.well-known/openid-configuration"
+URL="${KEYCLOAK_BASE_URL:-http://localhost:8082}/realms/master/.well-known/openid-configuration"
 echo "Waiting for Keycloak at $URL ..."
 for attempt in {1..60}; do
   if curl -sfS "$URL" >/dev/null; then

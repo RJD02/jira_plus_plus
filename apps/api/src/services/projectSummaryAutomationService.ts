@@ -258,21 +258,37 @@ export async function ensureProjectSummaryAutomationSchedule(): Promise<void> {
   const client = await getTemporalClient();
   const scheduleId = PROJECT_SUMMARY_AUTOMATION_SCHEDULE_ID;
 
-  try {
-    await client.schedule.create({
-      scheduleId,
-      spec: {
-        cronExpressions: [PROJECT_SUMMARY_AUTOMATION_CRON],
-      },
-      action: {
-        type: "startWorkflow" as const,
-        workflowType: PROJECT_SUMMARY_AUTOMATION_WORKFLOW_NAME,
-        taskQueue: getTaskQueue(),
-        args: [{}],
-      },
-    });
-  } catch (error) {
-    if (!(error instanceof Error) || !/Already exists/i.test(error.message)) {
+  const scheduleInput = {
+    scheduleId,
+    spec: { cronExpressions: [PROJECT_SUMMARY_AUTOMATION_CRON] },
+    action: {
+      type: "startWorkflow" as const,
+      workflowType: PROJECT_SUMMARY_AUTOMATION_WORKFLOW_NAME,
+      taskQueue: getTaskQueue(),
+      args: [{}],
+    },
+  };
+
+  const maxAttempts = 5;
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      await client.schedule.create(scheduleInput);
+      break;
+    } catch (error) {
+      if (error instanceof Error && /Already exists/i.test(error.message)) {
+        break;
+      }
+      const errMsg = error instanceof Error ? error.message : "";
+      const causeMsg = error instanceof Error && error.cause instanceof Error ? error.cause.message : "";
+      const isTransient =
+        /UNAVAILABLE|shard status unknown|DEADLINE_EXCEEDED|context deadline exceeded|Failed to create schedule/i.test(errMsg) ||
+        /UNAVAILABLE|shard status unknown|DEADLINE_EXCEEDED|context deadline exceeded/i.test(causeMsg);
+      if (isTransient && attempt < maxAttempts) {
+        const delay = attempt * 3000;
+        console.warn(`[Temporal] Schedule unavailable, retrying in ${delay}ms (attempt ${attempt}/${maxAttempts})`);
+        await new Promise((r) => setTimeout(r, delay));
+        continue;
+      }
       throw error;
     }
   }
