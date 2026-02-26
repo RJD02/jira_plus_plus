@@ -41,7 +41,7 @@ jobs:
 
             cd "\$PROD_DIR"
             git fetch origin
-            git checkout "\$TARGET"
+            git reset --hard "\$TARGET"
 
             echo "[promote] Running deploy script..."
             chmod +x infra/deploy.sh
@@ -52,9 +52,9 @@ jobs:
 
             HEALTH=\$(docker exec prod-api-1 curl -sf http://localhost:4000/health 2>/dev/null || echo "UNHEALTHY")
             if echo "\$HEALTH" | grep -q "status"; then
-              echo "[promote] ✓ Production API is healthy"
+              echo "[promote] Production API is healthy"
             else
-              echo "[promote] ⚠ WARNING: Production API health check failed!"
+              echo "[promote] WARNING: Production API health check failed"
               echo "[promote] Response: \$HEALTH"
               exit 1
             fi
