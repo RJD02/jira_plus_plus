@@ -37,7 +37,7 @@ const envSchema = z.object({
   INSIGHTS_LOCAL_TIMEOUT_MS: z.coerce.number().default(120000),
   INSIGHTS_PROVIDER: z
     .enum(["auto", "openai", "local"])
-    .default("local"),
+    .default("auto"),
   INSIGHTS_CACHE_TTL_MINUTES: z.coerce.number().default(720),
   NARRATIVE_PROVIDER: z
     .enum(["auto", "openai", "anthropic", "ollama", "local"])

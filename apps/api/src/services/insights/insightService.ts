@@ -430,12 +430,24 @@ async function computeInsights({
 
     skillResponse = parseInsightSkillOutput(skillExecution.output);
   } catch (error) {
-    logger.error("[insights] deterministic skill execution failed", error);
-    throw error instanceof Error ? error : new Error("Deterministic skill execution failed");
+    logger.error("[insights] LLM skill execution failed, falling back to rule-based insights", error);
   }
 
   if (!skillResponse || !skillExecution) {
-    throw new Error("Skill execution did not return a valid response");
+    logger.warn("[insights] Using rule-based fallback for issue", { issueId: context.issue.id });
+    return buildFallbackInsight({
+      context,
+      tenantId,
+      prisma,
+      hash,
+      summarySeed,
+      heuristicSentiment,
+      stageProgress,
+      deltaSummary,
+      waitingOn,
+      expiresAt,
+      previousSnapshot: previousSnapshot ?? null,
+    });
   }
 
   const rawConfidence = skillResponse.summary.confidence;
@@ -541,6 +553,130 @@ async function computeInsights({
   });
 
   return mapSnapshotRecord(snapshot);
+}
+
+interface BuildFallbackInsightArgs {
+  context: IssueContext;
+  tenantId: string;
+  prisma: PrismaClient;
+  hash: string;
+  summarySeed: InsightSummary;
+  heuristicSentiment: InsightSentiment;
+  stageProgress: StageProgressSnapshot;
+  deltaSummary: InsightDeltaSummary;
+  waitingOn: string[];
+  expiresAt: Date | null;
+  previousSnapshot: IssueInsightSnapshotRecord | null;
+}
+
+async function buildFallbackInsight(args: BuildFallbackInsightArgs): Promise<IssueInsightDTO> {
+  const {
+    context, tenantId, prisma, hash, summarySeed, heuristicSentiment,
+    stageProgress, deltaSummary, waitingOn, expiresAt, previousSnapshot,
+  } = args;
+
+  const resolvedSummary: InsightSummary = {
+    text: summarySeed.text,
+    provider: "rule_based",
+    confidence: summarySeed.confidence,
+  };
+  const resolvedSentiment: InsightSentiment = heuristicSentiment;
+  const signals = deriveRuleBasedSignals(context);
+  const escalateScore = resolvedSentiment.label === "negative" ? Math.min(1, Math.abs(resolvedSentiment.score) * 2) : 0;
+  const requirement = extractRequirement(context.issue);
+
+  const latestCommentCursor = determineLatestCommentCursor(context.comments, previousSnapshot?.commentCursor ?? null);
+  const latestWorklogCursor = determineLatestWorklogCursor(context.worklogs, previousSnapshot?.worklogCursor ?? null);
+
+  const providerMetadata: Record<string, unknown> = {
+    fallback: true,
+    stage: stageProgress,
+    delta: deltaSummary,
+    requirement,
+    waitingOn,
+    ruleSummary: summarySeed.text,
+  };
+
+  const snapshot = await prisma.issueInsightSnapshot.create({
+    data: {
+      tenantId,
+      issueId: context.issue.id,
+      provider: "rule_based",
+      inputsHash: hash,
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
+      escalationScore: escalateScore,
+      signals: signals as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
+      deltaSummary: deltaSummary as unknown as Prisma.InputJsonValue,
+      commentCursor: latestCommentCursor,
+      worklogCursor: latestWorklogCursor,
+      statusStage: stageProgress.currentStage,
+      stageBreakdown: stageProgress.breakdown as unknown as Prisma.InputJsonValue,
+    },
+  });
+
+  await prisma.issueInsight.upsert({
+    where: { issueId: context.issue.id },
+    create: {
+      tenantId,
+      issueId: context.issue.id,
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
+      escalationScore: escalateScore,
+      signals: signals as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
+      lastIssueHash: hash,
+      metadata: buildMetadata(context, stageProgress) as unknown as Prisma.InputJsonValue,
+      computedAt: snapshot.createdAt,
+      expiresAt,
+      latestSnapshotId: snapshot.id,
+    },
+    update: {
+      summary: resolvedSummary as unknown as Prisma.InputJsonValue,
+      sentiments: resolvedSentiment as unknown as Prisma.InputJsonValue,
+      escalationScore: escalateScore,
+      signals: signals as unknown as Prisma.InputJsonValue,
+      providerMetadata: providerMetadata as unknown as Prisma.InputJsonValue,
+      lastIssueHash: hash,
+      metadata: buildMetadata(context, stageProgress) as unknown as Prisma.InputJsonValue,
+      computedAt: snapshot.createdAt,
+      expiresAt,
+      latestSnapshotId: snapshot.id,
+    },
+  });
+
+  return mapSnapshotRecord(snapshot);
+}
+
+function deriveRuleBasedSignals(context: IssueContext): InsightSignal[] {
+  const signals: InsightSignal[] = [];
+  const issue = context.issue;
+
+  if (issue.dueDate) {
+    const due = new Date(issue.dueDate);
+    const now = new Date();
+    if (due < now && (issue.statusCategory ?? "").toLowerCase() !== "done") {
+      signals.push({ type: "overdue", severity: "high", detail: `Due date was ${due.toISOString().slice(0, 10)}` });
+    }
+  }
+
+  if ((issue.priority ?? "").toLowerCase().includes("critical") || (issue.priority ?? "").toLowerCase().includes("highest")) {
+    signals.push({ type: "high_priority", severity: "high", detail: `Priority is ${issue.priority}` });
+  }
+
+  const blockers = context.issue.linksOut.filter(
+    (link) => (link.linkType ?? "").toLowerCase().includes("block") && !isResolved(link.target),
+  );
+  if (blockers.length > 0) {
+    signals.push({
+      type: "blocked",
+      severity: "medium",
+      detail: `Blocked by ${blockers.map((b) => b.target?.key ?? "unknown").join(", ")}`,
+    });
+  }
+
+  return signals;
 }
 
 function determineLatestCommentCursor(
