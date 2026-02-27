@@ -155,12 +155,11 @@ export function formatNarrativeContent(raw: string | null | undefined): ReactNod
               {section.label}
             </div>
             {items.length > 1 ? (
-              <ul className="flex flex-wrap gap-1.5">
+              <ul className="grid gap-1.5">
                 {items.map((item, itemIndex) => (
                   <li
                     key={`chip-${index}-${itemIndex}`}
-                    className="max-w-[280px] truncate rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600 shadow-sm dark:bg-slate-900/60 dark:text-slate-300"
-                    title={item.replace(/\.$/, "")}
+                    className="rounded-xl bg-slate-50 px-3 py-1.5 text-xs leading-relaxed text-slate-600 shadow-sm dark:bg-slate-900/60 dark:text-slate-300"
                   >
                     {item.replace(/\.$/, "")}
                   </li>
