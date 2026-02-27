@@ -1912,11 +1912,13 @@ function ProjectList({
   emptyLabel: string;
   variant?: "default" | "compact" | "expanded";
 }) {
-  const listClass = variant === "compact" ? "grid gap-1.5" : "grid gap-2";
+  const listClass = variant === "compact" ? "grid gap-1.5" : variant === "expanded" ? "grid gap-3" : "grid gap-2";
   const itemClass =
     variant === "compact"
       ? "rounded-xl border border-slate-200 bg-white px-3 py-2 text-sm text-slate-700 shadow-sm dark:border-slate-800 dark:bg-slate-900/70 dark:text-slate-300"
-      : "rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300";
+      : variant === "expanded"
+        ? "rounded-2xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300"
+        : "rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300";
   const secondaryClass =
     variant === "compact"
       ? "text-[11px] uppercase tracking-wide text-slate-400 dark:text-slate-500"
@@ -1938,7 +1940,7 @@ function ProjectList({
               key={item.id}
               className={itemClass}
             >
-              <p className={variant === "expanded" ? "font-medium leading-relaxed" : "font-medium"}>{item.primary}</p>
+              <p className={variant === "expanded" ? "font-medium leading-relaxed break-words whitespace-normal" : "font-medium"}>{item.primary}</p>
               {item.secondary ? (
                 <p className={secondaryClass}>{item.secondary}</p>
               ) : null}
