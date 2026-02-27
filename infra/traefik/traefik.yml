@@ -8,23 +8,55 @@ http:
         frameDeny: true
         contentTypeNosniff: true
         referrerPolicy: no-referrer
-        permissionsPolicy: "vibrate 'none'"
-    basicAuthTemporal:
-      basicAuth:
-        users:
-          - "admin:$apr1$vY5rmvfe$VPF//4R1T1GbKBPJg3qUa1" # password: Temporal!23
+        permissionsPolicy: "vibrate none"
+    setu-redirect:
+      redirectScheme:
+        scheme: https
+
   routers:
-    temporal:
-      rule: "Host(`temporal.jira-plus-plus.in`)"
+    setu-http:
+      rule: "Host(`setu.jira-plus-plus.in`)"
+      entryPoints:
+        - web
+      middlewares:
+        - setu-redirect
+      service: setu-web
+
+    setu-websecure:
+      rule: "Host(`setu.jira-plus-plus.in`)"
       entryPoints:
         - websecure
       tls:
         certResolver: letsencrypt
-      service: temporal
       middlewares:
-        - basicAuthTemporal
+        - secureHeaders
+      service: setu-web
+
+    setu-api-http:
+      rule: "Host(`setu-api.jira-plus-plus.in`)"
+      entryPoints:
+        - web
+      middlewares:
+        - setu-redirect
+      service: setu-relay
+
+    setu-api-websecure:
+      rule: "Host(`setu-api.jira-plus-plus.in`)"
+      entryPoints:
+        - websecure
+      tls:
+        certResolver: letsencrypt
+      middlewares:
+        - secureHeaders
+      service: setu-relay
+
   services:
-    temporal:
+    setu-web:
       loadBalancer:
         servers:
-          - url: "http://temporal-ui:8080"
+          - url: "http://setu_web:80"
+
+    setu-relay:
+      loadBalancer:
+        servers:
+          - url: "http://relay-relay-1:18080"

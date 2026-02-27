@@ -1,0 +1,40 @@
+services:
+  api:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prod-api.rule=Host(`api.jira-plus-plus.in`)"
+      - "traefik.http.routers.prod-api.entrypoints=websecure"
+      - "traefik.http.routers.prod-api.tls.certresolver=letsencrypt"
+      - "traefik.http.services.prod-api.loadbalancer.server.port=4000"
+
+  web:
+    build:
+      args:
+        VITE_GRAPHQL_ENDPOINT: "https://api.jira-plus-plus.in/graphql"
+        VITE_API_BASE_URL: "https://api.jira-plus-plus.in"
+        VITE_KEYCLOAK_BASE_URL: "https://app.jira-plus-plus.in"
+        VITE_KEYCLOAK_REALM: "nucleus"
+        VITE_KEYCLOAK_CLIENT_ID: "jira-plus-plus"
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prod-web.rule=Host(`app.jira-plus-plus.in`)"
+      - "traefik.http.routers.prod-web-root.rule=Host(`jira-plus-plus.in`)"
+      - "traefik.http.routers.prod-web.entrypoints=websecure"
+      - "traefik.http.routers.prod-web-root.entrypoints=websecure"
+      - "traefik.http.routers.prod-web.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prod-web-root.tls.certresolver=letsencrypt"
+      - "traefik.http.services.prod-web.loadbalancer.server.port=3000"
+      - "traefik.http.middlewares.prod-web-redirect.redirectscheme.scheme=https"
+      - "traefik.http.routers.prod-web-http.rule=Host(`app.jira-plus-plus.in`,`jira-plus-plus.in`)"
+      - "traefik.http.routers.prod-web-http.entrypoints=web"
+      - "traefik.http.routers.prod-web-http.middlewares=prod-web-redirect"
+
+  temporal-ui:
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.prod-temporal.rule=Host(`temporal.jira-plus-plus.in`)"
+      - "traefik.http.routers.prod-temporal.entrypoints=websecure"
+      - "traefik.http.routers.prod-temporal.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.prod-temporal.middlewares=prod-temporal-auth"
+      - "traefik.http.services.prod-temporal.loadbalancer.server.port=8080"
+      - "traefik.http.middlewares.prod-temporal-auth.basicauth.users=admin:$$apr1$$vY5rmvfe$$VPF//4R1T1GbKBPJg3qUa1"
