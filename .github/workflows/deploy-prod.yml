@@ -94,6 +94,9 @@ jobs:
         run: pnpm exec playwright install --with-deps chromium
 
       - name: E2E smoke tests
-        run: pnpm exec playwright test tests/base-smoke.spec.ts
+        run: |
+          pnpm -C apps/jira-plus-plus dev --port 5175 &
+          npx wait-on http://127.0.0.1:5175 --timeout 30000
+          pnpm exec playwright test tests/base-smoke.spec.ts
         env:
-          WEB_URL: https://app.jira-plus-plus.in
+          WEB_URL: http://127.0.0.1:5175
