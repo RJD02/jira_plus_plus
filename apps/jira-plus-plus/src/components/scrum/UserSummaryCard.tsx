@@ -122,20 +122,20 @@ export function UserSummaryCard({
       >
         <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <h3 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
+            <h3 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100" title={displayName}>{displayName}</h3>
             {isUnmapped ? (
               <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
                 Jira only
               </span>
             ) : null}
           </div>
-          <p className="truncate text-sm text-slate-500 dark:text-slate-400">{email}</p>
+          <p className="truncate text-sm text-slate-500 dark:text-slate-400" title={email}>{email}</p>
           {summary.jiraAccountId ? (
-            <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500" title={`Jira Account · ${summary.jiraAccountId}`}>
               Jira Account · {summary.jiraAccountId}
             </p>
           ) : null}
-          <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
+          <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500" title={`${(summary.project?.key ?? "Project").toUpperCase()} · ${summary.project?.name ?? "Unknown"}`}>
             {(summary.project?.key ?? "Project").toUpperCase()} · {summary.project?.name ?? "Unknown"}
           </p>
         </div>
@@ -396,7 +396,7 @@ function DetailList({
           {entries.map((entry) => (
             <li key={entry.id} className="rounded-xl border border-slate-200 bg-white/80 p-3 dark:border-slate-800 dark:bg-slate-900/40">
               <p className="font-medium text-slate-800 dark:text-slate-200">{entry.primary}</p>
-              <p className="line-clamp-3 break-words text-sm text-slate-600 dark:text-slate-400">{entry.secondary}</p>
+              <p className="line-clamp-3 break-words text-sm text-slate-600 dark:text-slate-400" title={entry.secondary}>{entry.secondary}</p>
               <p className="text-xs text-slate-400 dark:text-slate-500">{entry.timestamp}</p>
             </li>
           ))}

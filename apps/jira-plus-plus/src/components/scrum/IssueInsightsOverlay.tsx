@@ -179,7 +179,7 @@ export function IssueInsightsOverlay({
                   <p className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
                     {item.issue.key}
                   </p>
-                  <p className="line-clamp-2 text-xs text-slate-500 dark:text-slate-400">{item.issue.summary ?? "No summary"}</p>
+                  <p className="line-clamp-2 text-xs text-slate-500 dark:text-slate-400" title={item.issue.summary ?? "No summary"}>{item.issue.summary ?? "No summary"}</p>
                 </button>
               ))}
               {!displayItems.length ? (
@@ -262,7 +262,7 @@ function TicketInsightsContent({
             </span>
           ) : null}
         </div>
-        <h3 className="break-words text-2xl font-semibold leading-tight text-slate-900 line-clamp-2 dark:text-slate-100">
+        <h3 className="break-words text-2xl font-semibold leading-tight text-slate-900 line-clamp-2 dark:text-slate-100" title={`${issue.key} · ${issue.summary ?? "No summary"}`}>
           {issue.key} · {issue.summary ?? "No summary"}
         </h3>
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
@@ -697,7 +697,7 @@ function LinkList({
                 <span>{link.linkType ?? "Link"}</span>
                 {link.direction ? <span>{link.direction}</span> : null}
               </div>
-              <p className="truncate text-sm font-semibold text-slate-800 dark:text-slate-200">
+              <p className="truncate text-sm font-semibold text-slate-800 dark:text-slate-200" title={related ? `${related.key ?? related.id} · ${related.summary ?? "(no summary)"}` : "Unknown issue"}>
                 {related ? `${related.key ?? related.id} · ${related.summary ?? "(no summary)"}` : "Unknown issue"}
               </p>
               {link.url ? (
