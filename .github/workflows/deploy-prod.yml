@@ -59,3 +59,41 @@ jobs:
               exit 1
             fi
           REMOTE
+
+  post-deploy-tests:
+    needs: promote
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.commit_sha || 'main' }}
+
+      - uses: pnpm/action-setup@v2
+        with:
+          version: 10
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Generate Prisma client
+        run: pnpm --filter ./apps/api prisma generate --schema prisma/schema.prisma
+
+      - name: Unit tests (API)
+        run: pnpm --filter @jira-plus-plus/api test
+
+      - name: Unit tests (Web)
+        run: pnpm test
+
+      - name: Install Playwright browsers
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: E2E smoke tests
+        run: pnpm exec playwright test tests/base-smoke.spec.ts
+        env:
+          WEB_URL: https://app.jira-plus-plus.in
