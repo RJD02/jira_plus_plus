@@ -1177,9 +1177,9 @@ export function AdminConsolePage() {
                       <td className="px-4 py-3 font-medium text-slate-900 dark:text-slate-100">
                         {site.alias}
                       </td>
-                      <td className="px-4 py-3 truncate">
+                      <td className="px-4 py-3">
                         <a
-                          className="text-slate-600 underline transition hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
+                          className="block truncate text-slate-600 underline transition hover:text-slate-800 dark:text-slate-300 dark:hover:text-slate-100"
                           href={site.baseUrl}
                           target="_blank"
                           rel="noreferrer"

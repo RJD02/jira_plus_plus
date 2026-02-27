@@ -30,6 +30,7 @@ export class ResendChannel implements CommunicationChannel {
     const { error } = await client.emails.send({
       from,
       to: payload.to,
+      ...(payload.cc?.length ? { cc: payload.cc } : {}),
       subject: payload.subject,
       ...(payload.html ? { html: payload.html } : { text: payload.text ?? "" }),
     });

@@ -134,7 +134,7 @@ export function FocusIssueList({ issues, eventsByIssueId, title, emptyState }: F
                     >
                       <div className="flex flex-wrap items-start justify-between gap-2">
                         <div className="space-y-1">
-                          <p className="text-sm font-medium text-slate-900 dark:text-slate-100">
+                          <p className="break-words text-sm font-medium text-slate-900 dark:text-slate-100">
                             {issue.browseUrl ? (
                               <a
                                 href={issue.browseUrl}

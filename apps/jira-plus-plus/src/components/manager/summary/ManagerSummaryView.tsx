@@ -448,7 +448,7 @@ export function ManagerSummaryView() {
                               <span className="font-medium text-slate-900 dark:text-slate-100">
                                 {blocker.issue.key}
                               </span>
-                              <span className="text-sm text-slate-500 dark:text-slate-400">
+                              <span className="line-clamp-2 text-sm text-slate-500 dark:text-slate-400">
                                 {blocker.issue.summary ?? "No summary available"}
                               </span>
                             </div>

@@ -50,7 +50,13 @@ async function bootstrap() {
 
   await seedAdminUser();
   try {
-    await ensureProjectSummaryAutomationSchedule();
+    const TEMPORAL_CONNECT_TIMEOUT_MS = 5_000;
+    await Promise.race([
+      ensureProjectSummaryAutomationSchedule(),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error("Temporal connection timed out")), TEMPORAL_CONNECT_TIMEOUT_MS),
+      ),
+    ]);
   } catch (error) {
     console.error("Failed to ensure project summary automation schedule", error);
   }

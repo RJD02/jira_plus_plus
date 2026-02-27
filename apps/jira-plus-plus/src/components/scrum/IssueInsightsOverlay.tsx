@@ -179,7 +179,7 @@ export function IssueInsightsOverlay({
                   <p className="mt-1 text-sm font-semibold text-slate-900 dark:text-slate-100">
                     {item.issue.key}
                   </p>
-                  <p className="text-xs text-slate-500 dark:text-slate-400">{item.issue.summary ?? "No summary"}</p>
+                  <p className="line-clamp-2 text-xs text-slate-500 dark:text-slate-400">{item.issue.summary ?? "No summary"}</p>
                 </button>
               ))}
               {!displayItems.length ? (
@@ -262,7 +262,7 @@ function TicketInsightsContent({
             </span>
           ) : null}
         </div>
-        <h3 className="text-2xl font-semibold text-slate-900 dark:text-slate-100">
+        <h3 className="break-words text-2xl font-semibold leading-tight text-slate-900 line-clamp-2 dark:text-slate-100">
           {issue.key} · {issue.summary ?? "No summary"}
         </h3>
         <div className="flex flex-wrap items-center gap-3 text-xs text-slate-500 dark:text-slate-400">
@@ -461,9 +461,9 @@ function TicketInsightsContent({
                 href={issue.browseUrl}
                 target="_blank"
                 rel="noreferrer"
-                className="inline-flex items-center gap-2 text-sky-600 hover:underline dark:text-sky-300"
+                className="inline-flex items-center gap-2 break-all text-sky-600 hover:underline dark:text-sky-300"
               >
-                <ExternalLink className="h-4 w-4" />
+                <ExternalLink className="h-4 w-4 shrink-0" />
                 {issue.browseUrl}
               </a>
             </li>
@@ -697,7 +697,7 @@ function LinkList({
                 <span>{link.linkType ?? "Link"}</span>
                 {link.direction ? <span>{link.direction}</span> : null}
               </div>
-              <p className="text-sm font-semibold text-slate-800 dark:text-slate-200">
+              <p className="truncate text-sm font-semibold text-slate-800 dark:text-slate-200">
                 {related ? `${related.key ?? related.id} · ${related.summary ?? "(no summary)"}` : "Unknown issue"}
               </p>
               {link.url ? (
@@ -736,9 +736,9 @@ function ExternalUrlList({ label, links }: { label: string; links: string[] }) {
               href={link}
               target="_blank"
               rel="noreferrer"
-              className="inline-flex items-center gap-2 text-sky-600 hover:underline dark:text-sky-300"
+              className="inline-flex items-center gap-2 break-all text-sky-600 hover:underline dark:text-sky-300"
             >
-              <ExternalLink className="h-3 w-3" />
+              <ExternalLink className="h-3 w-3 shrink-0" />
               {link}
             </a>
           </li>

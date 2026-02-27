@@ -120,22 +120,22 @@ export function UserSummaryCard({
         className="flex w-full items-start justify-between gap-3 text-left"
         onClick={handleCardClick}
       >
-        <div className="space-y-1">
+        <div className="min-w-0 space-y-1">
           <div className="flex items-center gap-2">
-            <h3 className="text-lg font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
+            <h3 className="truncate text-lg font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
             {isUnmapped ? (
               <span className="inline-flex items-center rounded-full bg-amber-100 px-2 py-0.5 text-xs font-medium text-amber-700 dark:bg-amber-900/40 dark:text-amber-200">
                 Jira only
               </span>
             ) : null}
           </div>
-          <p className="text-sm text-slate-500 dark:text-slate-400">{email}</p>
+          <p className="truncate text-sm text-slate-500 dark:text-slate-400">{email}</p>
           {summary.jiraAccountId ? (
-            <p className="text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
+            <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
               Jira Account · {summary.jiraAccountId}
             </p>
           ) : null}
-          <p className="text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
+          <p className="truncate text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">
             {(summary.project?.key ?? "Project").toUpperCase()} · {summary.project?.name ?? "Unknown"}
           </p>
         </div>
@@ -239,7 +239,7 @@ export function UserSummaryCard({
                                   </span>
                                 ) : null}
                               </div>
-                              <p className="text-sm leading-relaxed text-slate-600 dark:text-slate-300">
+                              <p className="break-words text-sm leading-relaxed text-slate-600 dark:text-slate-300">
                                 {item.issue.summary ?? "No summary provided."}
                               </p>
                               <div className="flex flex-wrap gap-3 text-xs text-slate-400 dark:text-slate-500">
@@ -396,7 +396,7 @@ function DetailList({
           {entries.map((entry) => (
             <li key={entry.id} className="rounded-xl border border-slate-200 bg-white/80 p-3 dark:border-slate-800 dark:bg-slate-900/40">
               <p className="font-medium text-slate-800 dark:text-slate-200">{entry.primary}</p>
-              <p className="text-sm text-slate-600 dark:text-slate-400">{entry.secondary}</p>
+              <p className="line-clamp-3 break-words text-sm text-slate-600 dark:text-slate-400">{entry.secondary}</p>
               <p className="text-xs text-slate-400 dark:text-slate-500">{entry.timestamp}</p>
             </li>
           ))}

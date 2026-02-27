@@ -159,7 +159,7 @@ export function formatNarrativeContent(raw: string | null | undefined): ReactNod
                 {items.map((item, itemIndex) => (
                   <li
                     key={`chip-${index}-${itemIndex}`}
-                    className="rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600 shadow-sm dark:bg-slate-900/60 dark:text-slate-300"
+                    className="max-w-[280px] truncate rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600 shadow-sm dark:bg-slate-900/60 dark:text-slate-300"
                   >
                     {item.replace(/\.$/, "")}
                   </li>
@@ -253,9 +253,9 @@ export function AISummaryPanel({
 
   const header = (
     <header className="flex flex-wrap items-start justify-between gap-3">
-      <div className="space-y-1">
+      <div className="min-w-0 space-y-1">
         <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">AI Summary</p>
-        <h3 className="text-xl font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
+        <h3 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
         <p className="text-xs text-slate-400 dark:text-slate-500">
           {narrativeGeneratedAt
             ? `Story updated ${new Date(narrativeGeneratedAt).toLocaleTimeString()}`
@@ -670,9 +670,9 @@ function TaskCard({
   return (
     <article className="space-y-3 rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700 dark:border-slate-800 dark:bg-slate-900/80 dark:text-slate-300">
       <header className="flex items-center justify-between gap-2">
-        <div>
+        <div className="min-w-0">
           <p className="text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">{payload.issueKey}</p>
-          <p className="font-semibold text-slate-800 dark:text-slate-100">{payload.headline}</p>
+          <p className="truncate font-semibold text-slate-800 dark:text-slate-100">{payload.headline}</p>
         </div>
         <Button
           type="button"
@@ -704,7 +704,7 @@ function TaskCard({
             <span className="font-semibold text-slate-600 dark:text-slate-200">Last touch:</span> {lastEvent.label}
           </p>
         ) : null}
-        <p>
+        <p className="truncate">
           <span className="font-semibold text-slate-600 dark:text-slate-200">Participants:</span> {payload.participants.map((participant) => participant.displayName).join(", ") || "—"}
         </p>
       </div>

@@ -25,11 +25,15 @@ function resolveDate(input: Date | string | null | undefined): DateTime {
 }
 
 function collectRecipients(managerRecords: Array<{ email: string | null }>): string[] {
-  return ['rishikesh.iitkgp@gmail.com']
   return managerRecords
     .map((user) => user.email?.trim())
     .filter((email): email is string => Boolean(email && email.length > 0));
 }
+
+const NEWSLETTER_CC = [
+  "rishikesh.kumar@whiteklay.in",
+  "raviraj.dulange@whiteklay.in",
+];
 
 type RawNarrativeVariant = { text?: unknown; generatedAt?: unknown } | null | undefined;
 
@@ -433,6 +437,7 @@ export async function sendDailySummaryNewsletter(
   await sendCommunication({
     payload: {
       to: recipients,
+      cc: NEWSLETTER_CC,
       subject,
       text: textBody,
       html: htmlBody,
