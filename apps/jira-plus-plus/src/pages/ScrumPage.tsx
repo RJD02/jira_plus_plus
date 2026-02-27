@@ -1709,7 +1709,7 @@ function ProjectOverviewCard({
                 secondary: item.issueKey,
               }))}
               emptyLabel="No highlights captured."
-              variant="compact"
+              variant="expanded"
             />
             <ProjectList
               title="Critical Blockers"
@@ -1910,7 +1910,7 @@ function ProjectList({
   title: string;
   items: Array<{ id: string; primary: string; secondary?: string }>;
   emptyLabel: string;
-  variant?: "default" | "compact";
+  variant?: "default" | "compact" | "expanded";
 }) {
   const listClass = variant === "compact" ? "grid gap-1.5" : "grid gap-2";
   const itemClass =
@@ -1938,7 +1938,7 @@ function ProjectList({
               key={item.id}
               className={itemClass}
             >
-              <p className="font-medium">{item.primary}</p>
+              <p className={variant === "expanded" ? "font-medium leading-relaxed" : "font-medium"}>{item.primary}</p>
               {item.secondary ? (
                 <p className={secondaryClass}>{item.secondary}</p>
               ) : null}

@@ -160,6 +160,7 @@ export function formatNarrativeContent(raw: string | null | undefined): ReactNod
                   <li
                     key={`chip-${index}-${itemIndex}`}
                     className="max-w-[280px] truncate rounded-full bg-slate-50 px-2.5 py-0.5 text-xs text-slate-600 shadow-sm dark:bg-slate-900/60 dark:text-slate-300"
+                    title={item.replace(/\.$/, "")}
                   >
                     {item.replace(/\.$/, "")}
                   </li>
@@ -255,7 +256,7 @@ export function AISummaryPanel({
     <header className="flex flex-wrap items-start justify-between gap-3">
       <div className="min-w-0 space-y-1">
         <p className="text-xs uppercase tracking-wide text-slate-500 dark:text-slate-400">AI Summary</p>
-        <h3 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100">{displayName}</h3>
+        <h3 className="truncate text-xl font-semibold text-slate-900 dark:text-slate-100" title={displayName}>{displayName}</h3>
         <p className="text-xs text-slate-400 dark:text-slate-500">
           {narrativeGeneratedAt
             ? `Story updated ${new Date(narrativeGeneratedAt).toLocaleTimeString()}`
@@ -672,7 +673,7 @@ function TaskCard({
       <header className="flex items-center justify-between gap-2">
         <div className="min-w-0">
           <p className="text-xs uppercase tracking-wide text-slate-400 dark:text-slate-500">{payload.issueKey}</p>
-          <p className="truncate font-semibold text-slate-800 dark:text-slate-100">{payload.headline}</p>
+          <p className="truncate font-semibold text-slate-800 dark:text-slate-100" title={payload.headline}>{payload.headline}</p>
         </div>
         <Button
           type="button"
@@ -704,7 +705,7 @@ function TaskCard({
             <span className="font-semibold text-slate-600 dark:text-slate-200">Last touch:</span> {lastEvent.label}
           </p>
         ) : null}
-        <p className="truncate">
+        <p>
           <span className="font-semibold text-slate-600 dark:text-slate-200">Participants:</span> {payload.participants.map((participant) => participant.displayName).join(", ") || "—"}
         </p>
       </div>
