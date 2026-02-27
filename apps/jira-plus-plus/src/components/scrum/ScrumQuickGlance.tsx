@@ -89,7 +89,7 @@ export function ScrumQuickGlance({ summaries, selectedId, onSelect }: ScrumQuick
             >
               <div className="flex items-start justify-between gap-2 ">
                 <div className="space-y-1">
-                  <p className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100 capitalize max-w-[80px]">
+                  <p className="truncate text-xs font-semibold text-slate-900 dark:text-slate-100 max-w-[120px]">
                     {displayName}
                   </p>
                   <p className="truncate text-[11px] text-slate-500 dark:text-slate-400">

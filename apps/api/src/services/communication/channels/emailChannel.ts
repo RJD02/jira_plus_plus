@@ -41,6 +41,7 @@ export class EmailChannel implements CommunicationChannel {
 
     await transporter.sendMail({
       to: payload.to,
+      ...(payload.cc?.length ? { cc: payload.cc } : {}),
       subject: payload.subject,
       text: payload.text,
       html: payload.html,

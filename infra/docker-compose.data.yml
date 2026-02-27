@@ -13,12 +13,22 @@ services:
       MINIO_ROOT_PASSWORD: adminadmin
     ports:
       - "9000:9000"
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   nats:
     image: nats:2
     container_name: jira_nats
     ports:
       - "4222:4222"
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
 
   local-llm:
     image: ollama/ollama:latest
@@ -35,6 +45,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
 volumes:
   ollama_models:

@@ -2,6 +2,7 @@ export type CommunicationChannelName = "email" | "whatsapp";
 
 export interface CommunicationPayload {
   to: string[];
+  cc?: string[];
   subject: string;
   text?: string;
   html?: string;

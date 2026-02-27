@@ -12,6 +12,11 @@ services:
       - keycloak-db-data:/var/lib/postgresql/data
     networks:
       - keycloak-network
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
   keycloak:
     image: quay.io/keycloak/keycloak:23.0.7
     container_name: keycloak
@@ -37,6 +42,11 @@ services:
       - "8082:8080"
     networks:
       - keycloak-network
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 volumes:
   keycloak-db-data: {}
 networks:

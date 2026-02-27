@@ -16,6 +16,11 @@ services:
       interval: 10s
       timeout: 5s
       retries: 5
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
 
   api:
     build:
@@ -30,6 +35,7 @@ services:
       # Use the internal Docker hostname so the API can reach Keycloak over the container network
       KEYCLOAK_BASE_URL: http://keycloak:8080
       KEYCLOAK_REALM: nucleus
+      TEMPORAL_ADDRESS: temporal:7233
       SKIP_PRISMA_MIGRATE: ${SKIP_PRISMA_MIGRATE:-}
     depends_on:
       postgres:
@@ -40,6 +46,11 @@ services:
       - default
       - keycloak_keycloak-network
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: "1.0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4000/health"]
       interval: 15s
@@ -56,12 +67,18 @@ services:
     environment:
       DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       SHADOW_DATABASE_URL: postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}_shadow
+      TEMPORAL_ADDRESS: temporal:7233
     depends_on:
       api:
         condition: service_healthy
       temporal:
         condition: service_healthy
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "1.0"
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4001/health"]
       interval: 30s
@@ -81,6 +98,11 @@ services:
     ports:
       - "3000:3000"
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: "0.5"
 
   temporal:
     image: temporalio/auto-setup:1.20.1
@@ -101,6 +123,11 @@ services:
       - ../.env
     ports:
       - "7233:7233"
+    deploy:
+      resources:
+        limits:
+          memory: 384M
+          cpus: "1.0"
     healthcheck:
       test: ["CMD", "tctl", "--address", "temporal:7233", "cluster", "health"]
       interval: 30s
@@ -117,6 +144,11 @@ services:
         condition: service_healthy
     ports:
       - "8081:8080"
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: "0.25"
 
   traefik:
     image: traefik:v2.11
@@ -142,6 +174,11 @@ services:
     env_file:
       - ../.env
     restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          memory: 64M
+          cpus: "0.25"
 
 volumes:
   postgres_data:
@@ -153,8 +190,5 @@ networks:
   default:
     name: infra_default
   keycloak_keycloak-network:
-    # Created automatically if Keycloak stack hasn't started yet.
-    # When the Keycloak compose project runs, its identically-named network
-    # will merge with this one, enabling hostname-based discovery.
-    name: keycloak_keycloak-network
-    driver: bridge
+    # Created by the Keycloak compose stack; reference it as external.
+    external: true
