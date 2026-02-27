@@ -100,3 +100,6 @@ jobs:
           pnpm exec playwright test tests/base-smoke.spec.ts
         env:
           WEB_URL: http://127.0.0.1:5175
+          VITE_KEYCLOAK_BASE_URL: http://localhost:8082
+          VITE_KEYCLOAK_REALM: nucleus
+          VITE_KEYCLOAK_CLIENT_ID: jira-plus-plus
